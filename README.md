@@ -4,6 +4,14 @@ OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-i
 
 Current release: `v0.0.1`.
 
+## Unofficial / Use at your own risk
+
+This is an unofficial community plugin and is not affiliated with, endorsed by, or supported by xAI. Use it at your own risk. You are responsible for reviewing and complying with the applicable xAI terms, policies, account rules, and API/service documentation before using OAuth, API keys, Grok, X Search, web search, image generation, or TTS through this plugin.
+
+Relevant xAI terms may change over time. Start with xAI's Terms of Service: https://x.ai/legal/terms-of-service
+
+This project does not provide legal advice and does not guarantee that any particular use of this plugin complies with xAI's Terms of Service, API terms, X terms, or other applicable policies.
+
 ## What it provides
 
 - `auth` hook attaches OAuth/API-key login methods to the existing OpenCode `xai` provider, so `opencode auth login` uses the normal **xAI** provider instead of creating a separate `xai-oauth` provider.
