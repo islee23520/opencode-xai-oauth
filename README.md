@@ -1,13 +1,16 @@
 # opencode-xai-oauth
 
-OpenCode plugin that adds xAI/Grok OAuth credentials plus xAI-powered tools for text, web search, X search, TTS, and image generation.
+OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, and image generation.
+
+Current release: `v0.0.1`.
 
 ## What it provides
 
-- `auth` hook attaches OAuth/API-key login methods to the existing OpenCode `xai` provider, so `opencode auth login` shows only the normal xAI provider path.
+- `auth` hook attaches OAuth/API-key login methods to the existing OpenCode `xai` provider, so `opencode auth login` uses the normal **xAI** provider instead of creating a separate `xai-oauth` provider.
 - Does **not** override OpenCode's built-in `xai` provider/model adapter; this avoids adapter mismatches such as `responses is not a function`.
-- Adds Grok thinking metadata to the built-in `xai` provider: `grok-4.3` exposes `low` / `medium` / `high` variants and maps them to xAI `reasoning_effort`.
-- `shell.env` hook that injects `XAI_API_KEY`/`XAI_BASE_URL` into tool shells when credentials are available.
+- Adds Grok thinking metadata to the built-in `xai` provider. `grok-4.3` exposes `low`, `medium`, `high`, `xhigh`, and `max` variants; `xhigh` and `max` are mapped down to xAI's supported `high` reasoning effort.
+- Marks `grok-4.20-reasoning` as reasoning-capable without sending unsupported `reasoning_effort` request parameters for that model.
+- `shell.env` hook injects `XAI_API_KEY`/`XAI_BASE_URL` into tool shells when credentials are available.
 - Custom OpenCode tools:
   - `xai_status`
   - `xai_generate_text`
@@ -15,6 +18,22 @@ OpenCode plugin that adds xAI/Grok OAuth credentials plus xAI-powered tools for 
   - `xai_x_search`
   - `xai_image_generate`
   - `xai_tts`
+
+
+## Supported features in v0.0.1
+
+| Area | What works | Notes |
+| --- | --- | --- |
+| OpenCode auth | OAuth login and API-key fallback for provider `xai` | The plugin attaches to the existing xAI provider. |
+| Grok chat/provider use | Uses OpenCode's built-in xAI adapter | The plugin only patches auth/config/params, not the provider adapter. |
+| Grok thinking variants | `low`, `medium`, `high`, `xhigh`, `max` for `grok-4.3` | `xhigh` and `max` map to `high` because xAI exposes `low`/`medium`/`high`. |
+| Grok 4.20 reasoning | Model is marked reasoning-capable | `reasoning_effort` is intentionally not sent for `grok-4.20-reasoning`. |
+| Text generation tool | `xai_generate_text` | Uses xAI Responses API. |
+| Web search tool | `xai_web_search` | Uses xAI server-side `web_search`. |
+| X search tool | `xai_x_search` | Supports allowed/excluded handles, date bounds, and media-understanding flags. |
+| Image generation tool | `xai_image_generate` | Calls xAI image generation endpoint. |
+| TTS tool | `xai_tts` | Returns base64 audio in tool output. |
+| Shell integration | `XAI_API_KEY` and `XAI_BASE_URL` injection | Available after credentials resolve. |
 
 ## References used
 
@@ -72,7 +91,7 @@ Endpoint/model names can change on xAI's side; pass explicit `model` arguments i
 
 ## Grok thinking mode
 
-The plugin patches OpenCode config metadata for the existing `xai` provider instead of replacing the provider adapter. For `grok-4.3`, OpenCode variants are mapped as follows:
+The plugin patches OpenCode config metadata for the existing `xai` provider instead of replacing the provider adapter. For `grok-4.3`, OpenCode variants are mapped as follows. The plugin writes both `reasoningEffort` and `reasoning_effort` into chat params for compatibility with OpenCode/xAI transport paths:
 
 | OpenCode variant | xAI reasoning effort |
 | --- | --- |
