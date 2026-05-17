@@ -43,7 +43,7 @@ function handles(input?: string[]) {
     .map((h) =>
       String(h || "")
         .trim()
-        .replace(/^@+/, "")
+        .replace(HANDLE_REGEX, "")
     )
     .filter(Boolean);
   if (cleaned.length > MAX_HANDLES) {
