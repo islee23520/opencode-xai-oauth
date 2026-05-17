@@ -82,13 +82,21 @@ function grokReasoningVariantOptions() {
 }
 
 function applyGrokThinkingConfig(config: MutableConfig) {
-  config.provider ??= {};
-  const xai = (config.provider.xai ??= {});
-  xai.models ??= {};
+  if (!config.provider) {
+    config.provider = {};
+  }
+  let xai = config.provider.xai;
+  if (!xai) {
+    xai = {};
+    config.provider.xai = xai;
+  }
+  if (!xai.models) {
+    xai.models = {};
+  }
 
   const upsertModel = (modelID: string, model: Record<string, unknown>) => {
     const current = xai.models?.[modelID] || {};
-    xai.models![modelID] = {
+    xai.models[modelID] = {
       ...current,
       ...model,
       variants: {
@@ -177,11 +185,13 @@ function inputModelID(input: unknown): string | undefined {
   if (!(isRecord(input) && isRecord(input.model))) {
     return;
   }
-  return typeof input.model.modelID === "string"
-    ? input.model.modelID
-    : typeof input.model.id === "string"
-      ? input.model.id
-      : undefined;
+  if (typeof input.model.modelID === "string") {
+    return input.model.modelID;
+  }
+  if (typeof input.model.id === "string") {
+    return input.model.id;
+  }
+  return undefined;
 }
 
 function inputProviderID(input: unknown): string | undefined {
