@@ -14,6 +14,13 @@ type MutableConfig = Config & {
     models?: Record<string, Record<string, unknown>>
     options?: Record<string, unknown>
   }>
+  command?: Record<string, {
+    template: string
+    description?: string
+    agent?: string
+    model?: string
+    subtask?: boolean
+  }>
 }
 
 function handles(input?: string[]) {
@@ -86,6 +93,40 @@ function applyGrokThinkingConfig(config: MutableConfig) {
     limit: { context: 1_000_000, output: 131_072 },
     modalities: { input: ["text", "image"], output: ["text"] },
   })
+}
+
+function applyXaiSkillCommands(config: MutableConfig) {
+  config.command ??= {}
+  const commands: NonNullable<MutableConfig["command"]> = {
+    "xai-status": {
+      description: "Check xAI OAuth/API-key credential status",
+      template: "Use the `xai_status` tool and summarize whether xAI credentials are available. Do not expose tokens or secrets.",
+    },
+    "xai-text": {
+      description: "Generate text with xAI Grok",
+      template: "Use the `xai_generate_text` tool for this request: $ARGUMENTS\n\nIf no model is specified, use the tool default. If the user asks for thinking effort, pass `reasoning_effort` as `low`, `medium`, or `high`.",
+    },
+    "xai-web-search": {
+      description: "Search the web with xAI/Grok native web_search",
+      template: "Use the `xai_web_search` tool to answer this web-search request: $ARGUMENTS\n\nReturn a concise answer and include citations from the tool output when available.",
+    },
+    "xai-x-search": {
+      description: "Search X/Twitter with xAI/Grok native x_search",
+      template: "Use the `xai_x_search` tool to answer this X/Twitter search request: $ARGUMENTS\n\nIf the user provides @handles, pass them as `allowed_x_handles` unless they explicitly ask to exclude them. Return a concise answer and include citations from the tool output when available.",
+    },
+    "xai-image": {
+      description: "Generate an image with xAI Grok Imagine",
+      template: "Use the `xai_image_generate` tool to generate an image for this prompt: $ARGUMENTS\n\nDefault to `grok-imagine-image`, `n: 1`, `resolution: 1k`, and `response_format: url` unless the user asks otherwise.",
+    },
+    "xai-tts": {
+      description: "Generate speech audio with xAI Text to Speech",
+      template: "Use the `xai_tts` tool to synthesize this text: $ARGUMENTS\n\nDefault to `voice_id: eve`, `language: auto`, and `codec: mp3` unless the user asks otherwise. Return the content type and explain that the audio is base64 in the tool output.",
+    },
+  }
+
+  for (const [name, command] of Object.entries(commands)) {
+    config.command[name] ??= command
+  }
 }
 
 function inputModelID(input: unknown): string | undefined {
@@ -165,6 +206,7 @@ export const XaiOAuthPlugin: Plugin = async (ctx) => {
     },
     config: async (config) => {
       applyGrokThinkingConfig(config as MutableConfig)
+      applyXaiSkillCommands(config as MutableConfig)
     },
     "chat.params": async (input, output) => {
       applyGrokReasoningParams(input, output)
@@ -214,7 +256,7 @@ export const XaiOAuthPlugin: Plugin = async (ctx) => {
           if (args.to_date) toolDef.to_date = args.to_date
           if (args.enable_image_understanding) toolDef.enable_image_understanding = true
           if (args.enable_video_understanding) toolDef.enable_video_understanding = true
-          const result = await xaiResponses({ prompt: args.query, model: args.model || "grok-4.20-reasoning", tools: [toolDef] })
+          const result = await xaiResponses({ prompt: args.query, model: args.model || "grok-4.3", tools: [toolDef] })
           return JSON.stringify({ success: true, tool: "x_search", query: args.query, answer: result.text, citations: result.citations, inline_citations: result.inline_citations }, null, 2)
         },
       }),
@@ -228,15 +270,25 @@ export const XaiOAuthPlugin: Plugin = async (ctx) => {
       }),
       xai_image_generate: tool({
         description: "Generate images with xAI's image generation endpoint. Returns upstream JSON, usually URLs or base64 payloads.",
-        args: { prompt: tool.schema.string(), model: tool.schema.string().optional(), n: tool.schema.number().int().min(1).max(4).optional(), size: tool.schema.string().optional(), response_format: tool.schema.enum(["url", "b64_json"]).optional() },
+        args: { prompt: tool.schema.string(), model: tool.schema.string().optional(), n: tool.schema.number().int().min(1).max(4).optional(), size: tool.schema.string().optional(), resolution: tool.schema.enum(["1k", "2k"]).optional(), response_format: tool.schema.enum(["url", "b64_json"]).optional() },
         async execute(args) {
           const data = await xaiImageGenerate(args)
           return JSON.stringify({ success: true, ...data }, null, 2)
         },
       }),
       xai_tts: tool({
-        description: "Generate speech audio with xAI's OpenAI-compatible speech endpoint. Returns base64 audio for saving by the caller.",
-        args: { input: tool.schema.string(), model: tool.schema.string().optional(), voice: tool.schema.string().optional(), format: tool.schema.string().optional() },
+        description: "Generate speech audio with xAI's Text to Speech endpoint. Returns base64 audio for saving by the caller.",
+        args: {
+          input: tool.schema.string(),
+          voice: tool.schema.string().optional(),
+          voice_id: tool.schema.string().optional(),
+          language: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+          codec: tool.schema.string().optional(),
+          sample_rate: tool.schema.number().int().optional(),
+          bit_rate: tool.schema.number().int().optional(),
+          text_normalization: tool.schema.boolean().optional(),
+        },
         async execute(args) {
           const result = await xaiTts(args)
           return { title: "xAI TTS", output: JSON.stringify({ success: true, content_type: result.contentType, audio_base64: result.bytes.toString("base64") }) }

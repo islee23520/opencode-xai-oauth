@@ -289,19 +289,42 @@ export async function xaiResponses(input: { prompt: string; model?: string; tool
   }
 }
 
-export async function xaiImageGenerate(args: { prompt: string; model?: string; n?: number; size?: string; response_format?: "url" | "b64_json" }) {
+export async function xaiImageGenerate(args: { prompt: string; model?: string; n?: number; size?: string; resolution?: "1k" | "2k"; response_format?: "url" | "b64_json" }) {
+  const body: Record<string, unknown> = {
+    model: args.model || "grok-imagine-image",
+    prompt: args.prompt,
+    n: args.n || 1,
+    response_format: args.response_format || "url",
+  }
+  if (args.resolution) body.resolution = args.resolution
+  if (args.size) body.size = args.size
   const response = await xaiFetch("/images/generations", {
     method: "POST",
-    body: JSON.stringify({ model: args.model || "grok-2-image", prompt: args.prompt, n: args.n || 1, size: args.size || "1024x1024", response_format: args.response_format || "url" }),
+    body: JSON.stringify(body),
   })
   return response.json()
 }
 
-export async function xaiTts(args: { input: string; model?: string; voice?: string; format?: string }) {
-  const response = await xaiFetch("/audio/speech", {
+export async function xaiTts(args: { input: string; voice?: string; voice_id?: string; language?: string; format?: string; codec?: string; sample_rate?: number; bit_rate?: number; text_normalization?: boolean }) {
+  const codec = args.codec || args.format
+  const body: Record<string, unknown> = {
+    text: args.input,
+    voice_id: args.voice_id || args.voice || "eve",
+    language: args.language || "auto",
+  }
+  if (codec || args.sample_rate || args.bit_rate) {
+    body.output_format = {
+      ...(codec ? { codec } : {}),
+      ...(args.sample_rate ? { sample_rate: args.sample_rate } : {}),
+      ...(args.bit_rate ? { bit_rate: args.bit_rate } : {}),
+    }
+  }
+  if (typeof args.text_normalization === "boolean") body.text_normalization = args.text_normalization
+
+  const response = await xaiFetch("/tts", {
     method: "POST",
-    body: JSON.stringify({ model: args.model || "grok-2-voice", voice: args.voice || "Aeris", input: args.input, response_format: args.format || "mp3" }),
+    body: JSON.stringify(body),
   })
   const bytes = Buffer.from(await response.arrayBuffer())
-  return { bytes, contentType: response.headers.get("content-type") || `audio/${args.format || "mpeg"}` }
+  return { bytes, contentType: response.headers.get("content-type") || `audio/${codec || "mpeg"}` }
 }

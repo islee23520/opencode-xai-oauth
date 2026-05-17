@@ -80,12 +80,35 @@ Check status:
 bun run src/cli.ts status
 ```
 
+
+## Skill-like OpenCode commands
+
+The plugin also injects command definitions through the config hook, and this repo's local OpenCode config includes matching markdown commands under `~/.config/opencode/commands/` for reliable TUI discovery:
+
+| Command | Maps to tool | Purpose |
+| --- | --- | --- |
+| `/xai-status` | `xai_status` | Check credential availability without exposing secrets. |
+| `/xai-text` | `xai_generate_text` | Generate text with Grok. |
+| `/xai-web-search` | `xai_web_search` | Search the live web through xAI Responses API. |
+| `/xai-x-search` | `xai_x_search` | Search X/Twitter through xAI Responses API. |
+| `/xai-image` | `xai_image_generate` | Generate images with Grok Imagine. |
+| `/xai-tts` | `xai_tts` | Generate speech audio and return base64 output. |
+
+Examples:
+
+```text
+/xai-web-search latest xAI model news
+/xai-x-search recent posts from @xai
+/xai-image tiny minimalist blue dot icon on white background
+/xai-tts hello from Grok
+```
+
 ## Tool notes
 
 - `xai_x_search` uses xAI Responses API with the server-side `x_search` tool. It supports allowed/excluded handles, date bounds, and image/video understanding flags.
 - `xai_web_search` uses the server-side `web_search` tool.
-- `xai_image_generate` calls `/images/generations`.
-- `xai_tts` calls `/audio/speech` and returns base64 audio in the tool output.
+- `xai_image_generate` calls `/images/generations`; default model is `grok-imagine-image`, with optional `resolution` (`1k` / `2k`).
+- `xai_tts` calls `/tts` and returns base64 audio in the tool output; default voice is `eve`, language is `auto`, and codec is `mp3`.
 
 Endpoint/model names can change on xAI's side; pass explicit `model` arguments if your account exposes different names.
 

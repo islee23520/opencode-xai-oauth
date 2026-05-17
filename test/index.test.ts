@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { XaiOAuthPlugin } from "../src/index"
-import { authPath, pkcePair, readStoredAuth, writeStoredAuth } from "../src/xai"
+import { authPath, pkcePair, readStoredAuth, writeStoredAuth, xaiImageGenerate, xaiTts } from "../src/xai"
 
 function pluginCtx() {
   return { client: { app: { log: async () => undefined } } } as never
@@ -44,6 +44,20 @@ describe("XaiOAuthPlugin", () => {
     expect(grok43Variants.xhigh.reasoningEffort).toBe("high")
     expect(grok43Variants.max.reasoningEffort).toBe("high")
     expect(provider.xai.models["grok-4.20-reasoning"].reasoning).toBe(true)
+  })
+
+  test("adds xAI skill-like OpenCode commands without overwriting user commands", async () => {
+    const plugin = await XaiOAuthPlugin(pluginCtx())
+    const config = { command: { "xai-web-search": { template: "custom" } } } as Record<string, unknown>
+
+    await plugin.config!(config as never)
+
+    const commands = config.command as Record<string, { template: string; description?: string }>
+    expect(commands["xai-web-search"].template).toBe("custom")
+    expect(commands["xai-x-search"].template).toContain("xai_x_search")
+    expect(commands["xai-image"].template).toContain("xai_image_generate")
+    expect(commands["xai-tts"].template).toContain("xai_tts")
+    expect(commands["xai-status"].template).toContain("xai_status")
   })
 
   test("maps xAI Grok 4.3 variants to reasoning effort request options", async () => {
@@ -100,7 +114,12 @@ describe("XaiOAuthPlugin", () => {
 describe("xAI auth helpers", () => {
   afterEach(() => {
     delete process.env.OPENCODE_XAI_OAUTH_AUTH_FILE
+    delete process.env.XAI_API_KEY
+    delete process.env.XAI_BASE_URL
+    globalThis.fetch = originalFetch
   })
+
+  const originalFetch = globalThis.fetch
 
   test("generates PKCE verifier and challenge", () => {
     const pair = pkcePair()
@@ -126,5 +145,44 @@ describe("xAI auth helpers", () => {
     writeFileSync(authPath(), "{not-json")
     expect(readStoredAuth()).toBeUndefined()
     rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("uses current xAI image generation defaults and resolution", async () => {
+    process.env.XAI_API_KEY = "xai-test"
+    let requestUrl = ""
+    let requestBody = {} as Record<string, unknown>
+    globalThis.fetch = (async (url, init) => {
+      requestUrl = String(url)
+      requestBody = JSON.parse(String(init?.body))
+      return new Response(JSON.stringify({ data: [{ url: "https://example.test/image.jpg" }] }), { status: 200, headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+
+    await xaiImageGenerate({ prompt: "tiny test image", resolution: "1k" })
+
+    expect(requestUrl).toBe("https://api.x.ai/v1/images/generations")
+    expect(requestBody.model).toBe("grok-imagine-image")
+    expect(requestBody.prompt).toBe("tiny test image")
+    expect(requestBody.resolution).toBe("1k")
+    expect(requestBody.size).toBeUndefined()
+  })
+
+  test("uses current xAI TTS endpoint and payload", async () => {
+    process.env.XAI_API_KEY = "xai-test"
+    let requestUrl = ""
+    let requestBody = {} as Record<string, unknown>
+    globalThis.fetch = (async (url, init) => {
+      requestUrl = String(url)
+      requestBody = JSON.parse(String(init?.body))
+      return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mpeg" } })
+    }) as typeof fetch
+
+    const result = await xaiTts({ input: "hello", voice_id: "eve", language: "en", codec: "mp3", sample_rate: 24000 })
+
+    expect(requestUrl).toBe("https://api.x.ai/v1/tts")
+    expect(requestBody.text).toBe("hello")
+    expect(requestBody.voice_id).toBe("eve")
+    expect(requestBody.language).toBe("en")
+    expect(requestBody.output_format).toEqual({ codec: "mp3", sample_rate: 24000 })
+    expect(result.bytes.length).toBe(3)
   })
 })
