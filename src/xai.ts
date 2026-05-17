@@ -14,6 +14,7 @@ export const XAI_OAUTH_REDIRECT_HOST = "127.0.0.1";
 export const XAI_OAUTH_REDIRECT_PORT = 56_121;
 export const XAI_OAUTH_REDIRECT_PATH = "/callback";
 export const REFRESH_SKEW_MS = 2 * 60 * 1000;
+const TRAILING_SLASH_REGEX = /\/$/;
 
 export interface StoredAuth {
   access: string;
@@ -39,6 +40,10 @@ interface TokenPayload {
   expires_in?: number;
   refresh_token?: string;
   token_type?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface CallbackResult {
@@ -274,12 +279,11 @@ export async function refreshStoredAuth(auth: StoredAuth): Promise<StoredAuth> {
 export async function resolveXaiCredentials(): Promise<XaiCredentials> {
   const stored = readStoredAuth();
   if (stored?.access) {
-    const current =
-      stored.expires <= Date.now()
-        ? await refreshStoredAuth(stored).then(
-            (next) => (writeStoredAuth(next), next)
-          )
-        : stored;
+    let current = stored;
+    if (stored.expires <= Date.now()) {
+      current = await refreshStoredAuth(stored);
+      writeStoredAuth(current);
+    }
     return {
       provider: "xai-oauth",
       apiKey: current.access,
@@ -342,17 +346,20 @@ export async function beginOAuth() {
 
 async function xaiFetch(path: string, init: RequestInit = {}) {
   const creds = await resolveXaiCredentials();
-  const response = await fetch(`${creds.baseUrl.replace(/\/$/, "")}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${creds.apiKey}`,
-      "User-Agent": "opencode-xai-oauth/0.1",
-      ...(init.body && !(init.body instanceof FormData)
-        ? { "Content-Type": "application/json" }
-        : {}),
-      ...(init.headers || {}),
-    },
-  });
+  const response = await fetch(
+    `${creds.baseUrl.replace(TRAILING_SLASH_REGEX, "")}${path}`,
+    {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${creds.apiKey}`,
+        "User-Agent": "opencode-xai-oauth/0.1",
+        ...(init.body && !(init.body instanceof FormData)
+          ? { "Content-Type": "application/json" }
+          : {}),
+        ...(init.headers || {}),
+      },
+    }
+  );
   if (!response.ok) {
     throw new Error(
       `xAI request failed: ${response.status} ${await response.text()}`
@@ -361,18 +368,26 @@ async function xaiFetch(path: string, init: RequestInit = {}) {
   return response;
 }
 
-function responseText(payload: any) {
+function outputMessages(payload: Record<string, unknown>) {
+  const output = Array.isArray(payload.output) ? payload.output : [];
+  return output.filter(
+    (item): item is Record<string, unknown> =>
+      isRecord(item) && item.type === "message" && Array.isArray(item.content)
+  );
+}
+
+function responseText(payload: Record<string, unknown>) {
   if (typeof payload.output_text === "string" && payload.output_text.trim()) {
     return payload.output_text.trim();
   }
   const parts: string[] = [];
-  for (const item of payload.output || []) {
-    if (item?.type !== "message") {
-      continue;
-    }
-    for (const content of item.content || []) {
+  for (const item of outputMessages(payload)) {
+    for (const content of item.content as unknown[]) {
+      if (!isRecord(content)) {
+        continue;
+      }
       if (
-        (content?.type === "output_text" || content?.type === "text") &&
+        (content.type === "output_text" || content.type === "text") &&
         content.text
       ) {
         parts.push(String(content.text));
@@ -382,15 +397,15 @@ function responseText(payload: any) {
   return parts.join("\n\n").trim();
 }
 
-function inlineCitations(payload: any) {
-  const citations: any[] = [];
-  for (const item of payload.output || []) {
-    if (item?.type !== "message") {
-      continue;
-    }
-    for (const content of item.content || []) {
-      for (const annotation of content.annotations || []) {
-        if (annotation?.type === "url_citation") {
+function inlineCitations(payload: Record<string, unknown>) {
+  const citations: Record<string, unknown>[] = [];
+  for (const item of outputMessages(payload)) {
+    for (const content of item.content as unknown[]) {
+      if (!(isRecord(content) && Array.isArray(content.annotations))) {
+        continue;
+      }
+      for (const annotation of content.annotations) {
+        if (isRecord(annotation) && annotation.type === "url_citation") {
           citations.push(annotation);
         }
       }
@@ -402,7 +417,7 @@ function inlineCitations(payload: any) {
 export async function xaiResponses(input: {
   prompt: string;
   model?: string;
-  tools?: any[];
+  tools?: Record<string, unknown>[];
   reasoningEffort?: "low" | "medium" | "high";
   timeoutMs?: number;
 }) {

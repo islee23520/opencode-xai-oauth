@@ -14,6 +14,8 @@ import {
 } from "./xai";
 
 const MAX_HANDLES = 10;
+const HANDLE_REGEX = /^@/;
+
 const GROK_REASONING_EFFORTS = ["low", "medium", "high"] as const;
 
 type GrokReasoningEffort = (typeof GROK_REASONING_EFFORTS)[number];
@@ -93,10 +95,11 @@ function applyGrokThinkingConfig(config: MutableConfig) {
   if (!xai.models) {
     xai.models = {};
   }
+  const models = xai.models;
 
   const upsertModel = (modelID: string, model: Record<string, unknown>) => {
-    const current = xai.models?.[modelID] || {};
-    xai.models[modelID] = {
+    const current = models[modelID] || {};
+    models[modelID] = {
       ...current,
       ...model,
       variants: {
@@ -191,7 +194,7 @@ function inputModelID(input: unknown): string | undefined {
   if (typeof input.model.id === "string") {
     return input.model.id;
   }
-  return undefined;
+  return;
 }
 
 function inputProviderID(input: unknown): string | undefined {
@@ -244,7 +247,92 @@ function applyGrokReasoningParams(input: unknown, output: unknown) {
   options.reasoning_effort = effort;
 }
 
+interface ToolAttachment {
+  filename: string;
+  mime: string;
+  type: "file";
+  url: string;
+}
+
+interface ImagePayload {
+  b64_json?: string;
+  mime_type?: string;
+  url?: string;
+}
+
+interface ImageGenerationResult {
+  data?: ImagePayload[];
+  [key: string]: unknown;
+}
+
+interface VideoGenerationResult {
+  video?: { url?: string };
+  [key: string]: unknown;
+}
+
+async function imageAttachmentForPayload(
+  image: ImagePayload,
+  index: number,
+  worktree: string
+): Promise<ToolAttachment | undefined> {
+  const timestamp = Date.now() + index;
+  const mime = image.mime_type || "image/png";
+  const ext = mime.includes("jpeg") || mime.includes("jpg") ? "jpg" : "png";
+  const filename = `grok-image-${index + 1}.${ext}`;
+
+  if (image.b64_json) {
+    try {
+      const url = await saveBase64Image(
+        image.b64_json,
+        `grok-image-${timestamp}.${ext}`,
+        worktree
+      );
+      return { type: "file", mime, url, filename };
+    } catch (error) {
+      console.error("Failed to save base64 image locally:", error);
+    }
+  }
+
+  if (!image.url) {
+    return;
+  }
+
+  try {
+    const url = await downloadMediaToArtifacts(
+      image.url,
+      `grok-image-${timestamp}.${ext}`,
+      worktree
+    );
+    return { type: "file", mime, url, filename };
+  } catch (error) {
+    console.error(
+      "Local download failed for image, using remote URL for attachment:",
+      error
+    );
+    return { type: "file", mime, url: image.url, filename };
+  }
+}
+
+async function imageAttachments(
+  images: ImagePayload[],
+  worktree: string
+): Promise<ToolAttachment[]> {
+  const attachments: ToolAttachment[] = [];
+  for (let index = 0; index < images.length; index++) {
+    const attachment = await imageAttachmentForPayload(
+      images[index],
+      index,
+      worktree
+    );
+    if (attachment) {
+      attachments.push(attachment);
+    }
+  }
+  return attachments;
+}
+
 export const plugin: Plugin = async (ctx) => {
+  await Promise.resolve();
   return {
     auth: {
       provider: "xai",
@@ -300,6 +388,7 @@ export const plugin: Plugin = async (ctx) => {
             },
           ],
           async authorize(inputs) {
+            await Promise.resolve();
             const key = String(inputs?.apiKey || "").trim();
             return key
               ? {
@@ -314,10 +403,12 @@ export const plugin: Plugin = async (ctx) => {
       ],
     },
     config: async (config) => {
+      await Promise.resolve();
       applyGrokThinkingConfig(config as MutableConfig);
       applyXaiSkillCommands(config as MutableConfig);
     },
     "chat.params": async (input, output) => {
+      await Promise.resolve();
       applyGrokReasoningParams(input, output);
     },
     tool: {
@@ -482,71 +573,20 @@ export const plugin: Plugin = async (ctx) => {
           response_format: tool.schema.enum(["url", "b64_json"]).optional(),
         },
         async execute(args, context) {
-          const data = await xaiImageGenerate(args);
-          const result: any = { success: true, ...data };
+          const data = (await xaiImageGenerate(args)) as ImageGenerationResult;
+          const result: Record<string, unknown> = { success: true, ...data };
+          const images = data.data || [];
+          const attachments = await imageAttachments(images, context.worktree);
 
-          const images = data?.data || [];
-          if (images.length > 0) {
-            const attachments: any[] = [];
-
-            for (let i = 0; i < images.length; i++) {
-              const img = images[i];
-              const timestamp = Date.now() + (i > 0 ? i : 0);
-              const mime = img.mime_type || "image/png";
-              const ext =
-                mime.includes("jpeg") || mime.includes("jpg") ? "jpg" : "png";
-
-              let attachmentUrl: string | null = null;
-              const filename = `grok-image-${i + 1}.${ext}`;
-
-              if (img.b64_json) {
-                try {
-                  const localPath = await saveBase64Image(
-                    img.b64_json,
-                    `grok-image-${timestamp}.${ext}`,
-                    context.worktree
-                  );
-                  attachmentUrl = localPath;
-                } catch (e) {
-                  console.error("Failed to save base64 image locally:", e);
-                }
-              } else if (img.url) {
-                try {
-                  const localPath = await downloadMediaToArtifacts(
-                    img.url,
-                    `grok-image-${timestamp}.${ext}`,
-                    context.worktree
-                  );
-                  attachmentUrl = localPath;
-                } catch (e) {
-                  console.error(
-                    "Local download failed for image, using remote URL for attachment:",
-                    e
-                  );
-                  attachmentUrl = img.url; // Fallback so OpenTUI can still show the popup
-                }
-              }
-
-              if (attachmentUrl) {
-                attachments.push({
-                  type: "file",
-                  mime,
-                  url: attachmentUrl,
-                  filename,
-                });
-              }
-            }
-
-            if (attachments.length > 0) {
-              return {
-                title:
-                  images.length === 1
-                    ? "xAI Image"
-                    : `xAI Images (${images.length})`,
-                output: JSON.stringify(result, null, 2),
-                attachments,
-              };
-            }
+          if (attachments.length > 0) {
+            return {
+              title:
+                images.length === 1
+                  ? "xAI Image"
+                  : `xAI Images (${images.length})`,
+              output: JSON.stringify(result, null, 2),
+              attachments,
+            };
           }
 
           return JSON.stringify(result, null, 2);
@@ -593,8 +633,8 @@ export const plugin: Plugin = async (ctx) => {
             .optional(),
         },
         async execute(args, context) {
-          const data = await xaiVideoGenerate(args as any);
-          const result: any = { success: true, ...data };
+          const data = (await xaiVideoGenerate(args)) as VideoGenerationResult;
+          const result: Record<string, unknown> = { success: true, ...data };
 
           // Attach the generated video so OpenCode (OpenTUI) can show it in a nice popup/media player.
           // Download locally under .opencode/artifacts/ for a stable file after generation.
@@ -645,7 +685,9 @@ export const plugin: Plugin = async (ctx) => {
               message: "xAI OAuth plugin loaded",
             },
           })
-          .catch(() => {});
+          .catch(() => {
+            // Logging is best-effort only.
+          });
       }
     },
   };

@@ -199,14 +199,19 @@ describe("xAI auth helpers", () => {
     process.env.XAI_API_KEY = "xai-test";
     let requestUrl = "";
     let requestBody = {} as Record<string, unknown>;
-    globalThis.fetch = (async (url, init) => {
+    globalThis.fetch = ((
+      url: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1]
+    ) => {
       requestUrl = String(url);
       requestBody = JSON.parse(String(init?.body));
-      return new Response(
-        JSON.stringify({ data: [{ url: "https://example.test/image.jpg" }] }),
-        { status: 200, headers: { "content-type": "application/json" } }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ data: [{ url: "https://example.test/image.jpg" }] }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
       );
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     await xaiImageGenerate({ prompt: "tiny test image", resolution: "1k" });
 
@@ -221,14 +226,19 @@ describe("xAI auth helpers", () => {
     process.env.XAI_API_KEY = "xai-test";
     let requestUrl = "";
     let requestBody = {} as Record<string, unknown>;
-    globalThis.fetch = (async (url, init) => {
+    globalThis.fetch = ((
+      url: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1]
+    ) => {
       requestUrl = String(url);
       requestBody = JSON.parse(String(init?.body));
-      return new Response(new Uint8Array([1, 2, 3]), {
-        status: 200,
-        headers: { "content-type": "audio/mpeg" },
-      });
-    }) as typeof fetch;
+      return Promise.resolve(
+        new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "audio/mpeg" },
+        })
+      );
+    }) as unknown as typeof fetch;
 
     const result = await xaiTts({
       input: "hello",
@@ -259,7 +269,10 @@ describe("xAI auth helpers", () => {
     }> = [];
     let pollCount = 0;
 
-    globalThis.fetch = (async (url, init) => {
+    globalThis.fetch = ((
+      url: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1]
+    ) => {
       const u = String(url);
       const method = String(init?.method || "GET").toUpperCase();
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -268,33 +281,39 @@ describe("xAI auth helpers", () => {
 
       if (u.includes("/videos/generations") && method === "POST") {
         // First submit returns request_id
-        return new Response(JSON.stringify({ request_id: "vid-test-123" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
+        return Promise.resolve(
+          new Response(JSON.stringify({ request_id: "vid-test-123" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        );
       }
 
       if (u.includes("/videos/vid-test-123") && method === "GET") {
         pollCount++;
         if (pollCount === 1) {
           // First poll returns pending → one very short sleep in test
-          return new Response(JSON.stringify({ status: "pending" }), {
-            status: 200,
-          });
+          return Promise.resolve(
+            new Response(JSON.stringify({ status: "pending" }), {
+              status: 200,
+            })
+          );
         }
         // Second poll succeeds
-        return new Response(
-          JSON.stringify({
-            status: "done",
-            model: "grok-imagine-video",
-            video: { url: "https://vidgen.x.ai/test-video.mp4", duration: 8 },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              status: "done",
+              model: "grok-imagine-video",
+              video: { url: "https://vidgen.x.ai/test-video.mp4", duration: 8 },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          )
         );
       }
 
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as unknown as typeof fetch;
 
     const result = await xaiVideoGenerate(
       {
