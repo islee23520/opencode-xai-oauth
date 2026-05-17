@@ -6,6 +6,8 @@ Current release: `v0.0.1`.
 
 ## Unofficial / Use at your own risk
 
+⚠️ Experimental project. Uses consumer OAuth for personal use. Not affiliated with or endorsed by xAI. Use the official xAI API for production.
+
 This is an unofficial community plugin and is not affiliated with, endorsed by, or supported by xAI. Use it at your own risk. You are responsible for reviewing and complying with the applicable xAI terms, policies, account rules, and API/service documentation before using OAuth, API keys, Grok, X Search, web search, image generation, or TTS through this plugin.
 
 Relevant xAI terms may change over time. Start with xAI's Terms of Service: https://x.ai/legal/terms-of-service
