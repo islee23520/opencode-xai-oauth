@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto"
+import { createHash, randomBytes, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { createServer, type Server } from "node:http"
 import { homedir } from "node:os"
@@ -327,4 +327,122 @@ export async function xaiTts(args: { input: string; voice?: string; voice_id?: s
   })
   const bytes = Buffer.from(await response.arrayBuffer())
   return { bytes, contentType: response.headers.get("content-type") || `audio/${codec || "mpeg"}` }
+}
+
+export async function xaiVideoGenerate(
+  args: {
+    prompt: string
+    model?: string
+    duration?: number
+    aspect_ratio?: string
+    resolution?: "480p" | "720p"
+    image_url?: string
+    reference_image_urls?: string[]
+  },
+  testOpts?: { pollIntervalMs?: number; maxWaitMs?: number },
+) {
+  const idempotencyKey = randomUUID()
+  const body: Record<string, unknown> = {
+    model: args.model || "grok-imagine-video",
+    prompt: args.prompt,
+    duration: typeof args.duration === "number" ? args.duration : 8,
+    aspect_ratio: args.aspect_ratio || "16:9",
+    resolution: args.resolution || "720p",
+  }
+  if (args.image_url) {
+    body.image = { url: args.image_url }
+  }
+  if (args.reference_image_urls && args.reference_image_urls.length > 0) {
+    body.reference_images = args.reference_image_urls.map((url) => ({ url }))
+  }
+
+  // Submit generation request (Hermes reference: uses /videos/generations + idempotency key)
+  const submitRes = await xaiFetch("/videos/generations", {
+    method: "POST",
+    headers: { "x-idempotency-key": idempotencyKey },
+    body: JSON.stringify(body),
+  })
+  const submitJson = (await submitRes.json()) as { request_id?: string }
+  const requestId = submitJson.request_id
+  if (!requestId) {
+    throw new Error("xAI video submit response did not include request_id")
+  }
+
+  // Poll until done / failed / expired (modeled on Hermes XAIVideoGenProvider._poll)
+  const TIMEOUT_MS = testOpts?.maxWaitMs ?? 300_000 // 5 minutes
+  const POLL_INTERVAL_MS = testOpts?.pollIntervalMs ?? 5000
+  const start = Date.now()
+  while (Date.now() - start < TIMEOUT_MS) {
+    const pollRes = await xaiFetch(`/videos/${encodeURIComponent(requestId)}`, {
+      method: "GET",
+    })
+    const data = (await pollRes.json()) as {
+      status?: string
+      video?: { url?: string; duration?: number }
+      error?: { message?: string }
+      message?: string
+      model?: string
+    }
+    const status = String(data.status || "").toLowerCase()
+
+    if (status === "done") {
+      return { request_id: requestId, ...data }
+    }
+    if (["failed", "expired", "error", "cancelled"].includes(status)) {
+      const errMsg = data.error?.message || data.message || `ended with status ${status}`
+      throw new Error(`xAI video generation ${status}: ${errMsg}`)
+    }
+    // pending / processing / queued etc.
+    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+  }
+  throw new Error(`xAI video generation timed out after ${Math.floor(TIMEOUT_MS / 1000)}s (request_id=${requestId})`)
+}
+
+/**
+ * Download a remote media URL (image or video) and save it locally under the project's
+ * `.opencode/artifacts/` directory. Returns the absolute path to the saved file.
+ *
+ * This allows OpenCode to display the media as a persistent popup/attachment
+ * even after the temporary xAI CDN URL expires.
+ */
+export async function downloadMediaToArtifacts(
+  url: string,
+  filename: string,
+  worktree: string,
+): Promise<string> {
+  const { mkdirSync, writeFileSync } = await import("node:fs")
+  const { join } = await import("node:path")
+
+  const artifactsDir = join(worktree, ".opencode", "artifacts")
+  mkdirSync(artifactsDir, { recursive: true })
+
+  const filePath = join(artifactsDir, filename)
+
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Failed to download media: ${res.status}`)
+  const buffer = Buffer.from(await res.arrayBuffer())
+  writeFileSync(filePath, buffer)
+
+  return filePath
+}
+
+/**
+ * Save a base64-encoded image (from xAI when response_format=b64_json) to the artifacts folder.
+ */
+export async function saveBase64Image(
+  b64Data: string,
+  filename: string,
+  worktree: string,
+): Promise<string> {
+  const { mkdirSync, writeFileSync } = await import("node:fs")
+  const { join } = await import("node:path")
+
+  const artifactsDir = join(worktree, ".opencode", "artifacts")
+  mkdirSync(artifactsDir, { recursive: true })
+
+  const filePath = join(artifactsDir, filename)
+  const buffer = Buffer.from(b64Data, "base64")
+  writeFileSync(filePath, buffer)
+
+  return filePath
 }

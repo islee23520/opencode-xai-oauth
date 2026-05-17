@@ -6,3 +6,6 @@ coverage
 .env.*
 
 .omx
+.omo
+.omc
+*.tgz

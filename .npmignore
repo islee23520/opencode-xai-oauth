@@ -1,0 +1,29 @@
+# Development & source
+src/
+test/
+*.ts
+tsconfig.json
+bunfig.toml
+
+# Git & VCS
+.git/
+.gitignore
+
+# Local caches & secrets
+.env
+.env.*
+.omx/
+.omo/
+.omc/
+.DS_Store
+
+# Build artifacts & temporary
+*.tgz
+coverage/
+node_modules/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo

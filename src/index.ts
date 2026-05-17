@@ -1,6 +1,17 @@
 import type { Config, Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { beginOAuth, readStoredAuth, resolveXaiCredentials, xaiImageGenerate, xaiResponses, xaiTts, XAI_BASE_URL } from "./xai"
+import {
+  beginOAuth,
+  downloadMediaToArtifacts,
+  readStoredAuth,
+  resolveXaiCredentials,
+  saveBase64Image,
+  xaiImageGenerate,
+  xaiResponses,
+  xaiTts,
+  xaiVideoGenerate,
+  XAI_BASE_URL,
+} from "./xai"
 
 const MAX_HANDLES = 10
 const GROK_REASONING_EFFORTS = ["low", "medium", "high"] as const
@@ -112,12 +123,16 @@ function applyXaiSkillCommands(config: MutableConfig) {
       template: "Use the `xai_x_search` tool to answer this X/Twitter search request: $ARGUMENTS\n\nIf the user provides @handles, pass them as `allowed_x_handles` unless they explicitly ask to exclude them. Return a concise answer and include citations from the tool output when available.",
     },
     "xai-image": {
-      description: "Generate an image with xAI Grok Imagine",
-      template: "Use the `xai_image_generate` tool to generate an image for this prompt: $ARGUMENTS\n\nDefault to `grok-imagine-image`, `n: 1`, `resolution: 1k`, and `response_format: url` unless the user asks otherwise.",
+      description: "Generate an image with xAI Grok Imagine (shown as popup in OpenCode via OpenTUI)",
+      template: "Use the `xai_image_generate` tool to generate an image for this prompt: $ARGUMENTS\n\nThe image will be saved locally under .opencode/artifacts/ and displayed as a rich popup/preview in the OpenCode terminal (OpenTUI).",
     },
     "xai-tts": {
       description: "Generate speech audio with xAI Text to Speech",
       template: "Use the `xai_tts` tool to synthesize this text: $ARGUMENTS\n\nDefault to `voice_id: eve`, `language: auto`, and `codec: mp3` unless the user asks otherwise. Return the content type and explain that the audio is base64 in the tool output.",
+    },
+    "xai-video": {
+      description: "Generate a video with xAI Grok Imagine Video (shown as popup in OpenCode via OpenTUI)",
+      template: "Use the `xai_video_generate` tool to generate a video for this prompt: $ARGUMENTS\n\nSupports `image_url` (image-to-video) and `reference_image_urls` (array of up to 7 style/character references). The video is saved locally under .opencode/artifacts/ and shown in an OpenTUI media popup. Defaults: 8s, 16:9, 720p.",
     },
   }
 
@@ -159,7 +174,7 @@ function applyGrokReasoningParams(input: unknown, output: unknown) {
   options.reasoning_effort = effort
 }
 
-export const XaiOAuthPlugin: Plugin = async (ctx) => {
+export const plugin: Plugin = async (ctx) => {
   return {
     auth: {
       provider: "xai",
@@ -268,9 +283,68 @@ export const XaiOAuthPlugin: Plugin = async (ctx) => {
       xai_image_generate: tool({
         description: "Generate images with xAI's image generation endpoint. Returns upstream JSON, usually URLs or base64 payloads.",
         args: { prompt: tool.schema.string(), model: tool.schema.string().optional(), n: tool.schema.number().int().min(1).max(4).optional(), size: tool.schema.string().optional(), resolution: tool.schema.enum(["1k", "2k"]).optional(), response_format: tool.schema.enum(["url", "b64_json"]).optional() },
-        async execute(args) {
+        async execute(args, context) {
           const data = await xaiImageGenerate(args)
-          return JSON.stringify({ success: true, ...data }, null, 2)
+          const result: any = { success: true, ...data }
+
+          const images = data?.data || []
+          if (images.length > 0) {
+            const attachments: any[] = []
+
+            for (let i = 0; i < images.length; i++) {
+              const img = images[i]
+              const timestamp = Date.now() + (i > 0 ? i : 0)
+              const mime = img.mime_type || "image/png"
+              const ext = mime.includes("jpeg") || mime.includes("jpg") ? "jpg" : "png"
+
+              let attachmentUrl: string | null = null
+              const filename = `grok-image-${i + 1}.${ext}`
+
+              if (img.b64_json) {
+                try {
+                  const localPath = await saveBase64Image(
+                    img.b64_json,
+                    `grok-image-${timestamp}.${ext}`,
+                    context.worktree,
+                  )
+                  attachmentUrl = localPath
+                } catch (e) {
+                  console.error("Failed to save base64 image locally:", e)
+                }
+              } else if (img.url) {
+                try {
+                  const localPath = await downloadMediaToArtifacts(
+                    img.url,
+                    `grok-image-${timestamp}.${ext}`,
+                    context.worktree,
+                  )
+                  attachmentUrl = localPath
+                } catch (e) {
+                  console.error("Local download failed for image, using remote URL for attachment:", e)
+                  attachmentUrl = img.url   // Fallback so OpenTUI can still show the popup
+                }
+              }
+
+              if (attachmentUrl) {
+                attachments.push({
+                  type: "file",
+                  mime,
+                  url: attachmentUrl,
+                  filename,
+                })
+              }
+            }
+
+            if (attachments.length > 0) {
+              return {
+                title: images.length === 1 ? "xAI Image" : `xAI Images (${images.length})`,
+                output: JSON.stringify(result, null, 2),
+                attachments,
+              }
+            }
+          }
+
+          return JSON.stringify(result, null, 2)
         },
       }),
       xai_tts: tool({
@@ -291,6 +365,50 @@ export const XaiOAuthPlugin: Plugin = async (ctx) => {
           return { title: "xAI TTS", output: JSON.stringify({ success: true, content_type: result.contentType, audio_base64: result.bytes.toString("base64") }) }
         },
       }),
+      xai_video_generate: tool({
+        description: "Generate videos with xAI Grok Imagine (grok-imagine-video). Supports text-to-video, image-to-video (image_url), and reference images (reference_image_urls, up to 7). Media is saved locally and attached for OpenTUI popup display in OpenCode.",
+        args: {
+          prompt: tool.schema.string(),
+          model: tool.schema.string().optional(),
+          duration: tool.schema.number().int().min(1).max(15).optional(),
+          aspect_ratio: tool.schema.string().optional(),
+          resolution: tool.schema.enum(["480p", "720p"]).optional(),
+          image_url: tool.schema.string().optional(),
+          reference_image_urls: tool.schema.array(tool.schema.string()).optional(),
+        },
+        async execute(args, context) {
+          const data = await xaiVideoGenerate(args as any)
+          const result: any = { success: true, ...data }
+
+          // Attach the generated video so OpenCode (OpenTUI) can show it in a nice popup/media player.
+          // Download locally under .opencode/artifacts/ for a stable file after generation.
+          const videoUrl = data?.video?.url
+          if (videoUrl) {
+            try {
+              const localPath = await downloadMediaToArtifacts(
+                videoUrl,
+                `grok-video-${Date.now()}.mp4`,
+                context.worktree,
+              )
+              return {
+                title: "xAI Video",
+                output: JSON.stringify(result, null, 2),
+                attachments: [
+                  {
+                    type: "file",
+                    mime: "video/mp4",
+                    url: localPath,
+                    filename: "grok-video.mp4",
+                  },
+                ],
+              }
+            } catch {
+              // fallback to remote URL
+            }
+          }
+          return JSON.stringify(result, null, 2)
+        },
+      }),
     },
     "shell.env": async (_input, output) => {
       try {
@@ -307,4 +425,4 @@ export const XaiOAuthPlugin: Plugin = async (ctx) => {
   }
 }
 
-export default XaiOAuthPlugin
+export default plugin

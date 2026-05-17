@@ -1,8 +1,8 @@
 # opencode-xai-oauth
 
-OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, and image generation.
+OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, image generation, and video generation.
 
-Current release: `v0.0.1`.
+Current release: `v0.1.1`.
 
 ## Unofficial / Use at your own risk
 
@@ -28,6 +28,8 @@ This project does not provide legal advice and does not guarantee that any parti
   - `xai_x_search`
   - `xai_image_generate`
   - `xai_tts`
+  - `xai_video_generate`
+  - `xai_video_generate`
 
 
 ## Supported features in v0.0.1
@@ -43,6 +45,7 @@ This project does not provide legal advice and does not guarantee that any parti
 | X search tool | `xai_x_search` | Supports allowed/excluded handles, date bounds, and media-understanding flags. |
 | Image generation tool | `xai_image_generate` | Calls xAI image generation endpoint. |
 | TTS tool | `xai_tts` | Returns base64 audio in tool output. |
+| Video generation tool | `xai_video_generate` | Calls xAI /videos/generations (async submit + poll); returns URL when ready. Text-to-video and image-to-video supported. |
 | Shell integration | `XAI_API_KEY` and `XAI_BASE_URL` injection | Available after credentials resolve. |
 
 ## References used
@@ -51,15 +54,11 @@ This project does not provide legal advice and does not guarantee that any parti
 - `pi-xai-oauth`: OAuth discovery, PKCE, localhost callback, xAI client id/scope, and `~/.grok/auth.json` compatibility ideas.
 - Hermes Agent `x_search_tool.py` / `xai_http.py`: credential preference, xAI `/responses` usage, X-search handle normalization, response/citation extraction.
 
-## Install / load
+## Installation
 
-This repo is already in the global OpenCode plugin directory:
+### Via npm (recommended for end users)
 
-```bash
-~/.config/opencode/plugins/opencode-xai-oauth
-```
-
-For npm-style loading after publishing, add the package name to `opencode.json`:
+Add the package to your OpenCode configuration (`~/.config/opencode/opencode.json` or per-project `opencode.json`):
 
 ```json
 {
@@ -68,14 +67,38 @@ For npm-style loading after publishing, add the package name to `opencode.json`:
 }
 ```
 
+OpenCode automatically installs and loads npm plugins using Bun on startup (cached under `~/.cache/opencode/node_modules/`).
+
+### Local development / from source
+
+```bash
+git clone https://github.com/islee23520/opencode-xai-oauth.git ~/.config/opencode/plugins/opencode-xai-oauth
+cd ~/.config/opencode/plugins/opencode-xai-oauth
+bun install
+bun run build   # produces dist/ used by the package entry points
+```
+
+Restart OpenCode (or the TUI) after changes during development.
+
+### CLI tool
+
+After `npm install -g opencode-xai-oauth` (or from source with `bun link`):
+
+```bash
+opencode-xai-oauth login
+opencode-xai-oauth status
+```
+
+For one-off use: `npx opencode-xai-oauth login` (requires Bun in PATH for the current CLI build).
+
 ## Authenticate
 
 OAuth:
 
 ```bash
-bun run src/cli.ts login
-# or after linking the bin:
 opencode-xai-oauth login
+# or during local development:
+bun run src/cli.ts login
 ```
 
 API key fallback:
@@ -87,7 +110,7 @@ export XAI_API_KEY=xai-...
 Check status:
 
 ```bash
-bun run src/cli.ts status
+opencode-xai-oauth status
 ```
 
 
@@ -101,8 +124,9 @@ The plugin also injects command definitions through the config hook, and this re
 | `/xai-text` | `xai_generate_text` | Generate text with Grok. |
 | `/xai-web-search` | `xai_web_search` | Search the live web through xAI Responses API. |
 | `/xai-x-search` | `xai_x_search` | Search X/Twitter through xAI Responses API. |
-| `/xai-image` | `xai_image_generate` | Generate images with Grok Imagine. |
+| `/xai-image` | `xai_image_generate` | Generate images with Grok Imagine. Images are saved locally + shown as rich popups via OpenTUI. |
 | `/xai-tts` | `xai_tts` | Generate speech audio and return base64 output. |
+| `/xai-video` | `xai_video_generate` | Generate videos (text-to-video, image-to-video, or with reference images). Saved locally + shown in OpenTUI popups. |
 
 Examples:
 
@@ -111,14 +135,20 @@ Examples:
 /xai-x-search recent posts from @xai
 /xai-image tiny minimalist blue dot icon on white background
 /xai-tts hello from Grok
+/xai-video a serene mountain lake at sunrise with slow camera pan, cinematic lighting
 ```
 
 ## Tool notes
 
 - `xai_x_search` uses xAI Responses API with the server-side `x_search` tool. It supports allowed/excluded handles, date bounds, and image/video understanding flags.
 - `xai_web_search` uses the server-side `web_search` tool.
-- `xai_image_generate` calls `/images/generations`; default model is `grok-imagine-image`, with optional `resolution` (`1k` / `2k`).
+- `xai_image_generate` calls `/images/generations`; default model is `grok-imagine-image`, with optional `resolution` (`1k` / `2k`) and `response_format` (`url` or `b64_json`).
+  - Generated images (both URL and base64 responses) are automatically saved to `.opencode/artifacts/` and returned as `attachments` (with correct MIME) so OpenCode's OpenTUI-powered UI can display them in rich popups/previews. Supports `n > 1` for multiple images.
 - `xai_tts` calls `/tts` and returns base64 audio in the tool output; default voice is `eve`, language is `auto`, and codec is `mp3`.
+- `xai_video_generate` calls `/videos/generations` (modeled on Hermes XAIVideoGenProvider), polls until ready. Supports:
+  - `image_url` — classic image-to-video
+  - `reference_image_urls` — array of up to 7 reference images (for style/character consistency)
+  - Videos (and reference-guided videos) are downloaded locally to `.opencode/artifacts/` and attached as `video/mp4` so OpenCode's OpenTUI UI renders them in a proper media popup/player.
 
 Endpoint/model names can change on xAI's side; pass explicit `model` arguments if your account exposes different names.
 

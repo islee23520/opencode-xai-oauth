@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { XaiOAuthPlugin } from "../src/index"
-import { authPath, pkcePair, readStoredAuth, writeStoredAuth, xaiImageGenerate, xaiTts } from "../src/xai"
+import { plugin as XaiOAuthPlugin } from "../src/index"
+import { authPath, pkcePair, readStoredAuth, writeStoredAuth, xaiImageGenerate, xaiTts, xaiVideoGenerate } from "../src/xai"
 
 function pluginCtx() {
   return { client: { app: { log: async () => undefined } } } as never
@@ -23,6 +23,7 @@ describe("XaiOAuthPlugin", () => {
       "xai_image_generate",
       "xai_status",
       "xai_tts",
+      "xai_video_generate",
       "xai_web_search",
       "xai_x_search",
     ])
@@ -57,6 +58,7 @@ describe("XaiOAuthPlugin", () => {
     expect(commands["xai-x-search"].template).toContain("xai_x_search")
     expect(commands["xai-image"].template).toContain("xai_image_generate")
     expect(commands["xai-tts"].template).toContain("xai_tts")
+    expect(commands["xai-video"].template).toContain("xai_video_generate")
     expect(commands["xai-status"].template).toContain("xai_status")
   })
 
@@ -184,5 +186,79 @@ describe("xAI auth helpers", () => {
     expect(requestBody.language).toBe("en")
     expect(requestBody.output_format).toEqual({ codec: "mp3", sample_rate: 24000 })
     expect(result.bytes.length).toBe(3)
+  })
+
+  test("uses current xAI video generation defaults, supports image_url for i2v, and polls to completion", async () => {
+    process.env.XAI_API_KEY = "xai-test"
+    const calls: Array<{ url: string; method: string; body?: Record<string, unknown>; headers?: Record<string, string> }> = []
+    let pollCount = 0
+
+    globalThis.fetch = (async (url, init) => {
+      const u = String(url)
+      const method = String(init?.method || "GET").toUpperCase()
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined
+      const headers = (init?.headers as Record<string, string>) || {}
+      calls.push({ url: u, method, body, headers })
+
+      if (u.includes("/videos/generations") && method === "POST") {
+        // First submit returns request_id
+        return new Response(JSON.stringify({ request_id: "vid-test-123" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+
+      if (u.includes("/videos/vid-test-123") && method === "GET") {
+        pollCount++
+        if (pollCount === 1) {
+          // First poll returns pending → one very short sleep in test
+          return new Response(JSON.stringify({ status: "pending" }), { status: 200 })
+        }
+        // Second poll succeeds
+        return new Response(
+          JSON.stringify({
+            status: "done",
+            model: "grok-imagine-video",
+            video: { url: "https://vidgen.x.ai/test-video.mp4", duration: 8 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const result = await xaiVideoGenerate(
+      {
+        prompt: "a cat jumping over a fence",
+        duration: 6,
+        aspect_ratio: "16:9",
+        resolution: "720p",
+        image_url: "https://example.com/start-frame.jpg",
+      },
+      { pollIntervalMs: 1, maxWaitMs: 2000 },
+    )
+
+    // First call: POST to generations with correct payload + idempotency key
+    const submitCall = calls.find((c) => c.url.includes("/videos/generations") && c.method === "POST")
+    expect(submitCall).toBeTruthy()
+    expect(submitCall!.url).toBe("https://api.x.ai/v1/videos/generations")
+    expect(submitCall!.body?.model).toBe("grok-imagine-video")
+    expect(submitCall!.body?.prompt).toBe("a cat jumping over a fence")
+    expect(submitCall!.body?.duration).toBe(6)
+    expect(submitCall!.body?.aspect_ratio).toBe("16:9")
+    expect(submitCall!.body?.resolution).toBe("720p")
+    expect(submitCall!.body?.image).toEqual({ url: "https://example.com/start-frame.jpg" })
+    expect(submitCall!.headers?.["x-idempotency-key"]).toBeTruthy()
+
+    // Subsequent calls: polling GETs
+    const pollCalls = calls.filter((c) => c.url.includes("/videos/vid-test-123"))
+    expect(pollCalls.length).toBeGreaterThanOrEqual(2)
+    expect(pollCalls[0].method).toBe("GET")
+
+    // Final result shape
+    expect(result.status).toBe("done")
+    expect(result.video?.url).toBe("https://vidgen.x.ai/test-video.mp4")
+    expect(result.model).toBe("grok-imagine-video")
   })
 })
