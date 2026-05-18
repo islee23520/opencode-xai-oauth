@@ -3,10 +3,33 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { plugin as XaiOAuthPlugin } from "../src/index"
-import { authPath, pkcePair, readStoredAuth, writeStoredAuth, xaiImageGenerate, xaiTts, xaiVideoGenerate } from "../src/xai"
+import {
+  authPath,
+  defaultAuthPath,
+  legacyAuthPath,
+  pkcePair,
+  readStoredAuth,
+  type StoredAuth,
+  writeStoredAuth,
+  xaiImageGenerate,
+  xaiTts,
+  xaiVideoGenerate,
+} from "../src/xai"
 
 function pluginCtx() {
   return { client: { app: { log: async () => undefined } } } as never
+}
+
+function authFixture(overrides: Partial<StoredAuth> = {}): StoredAuth {
+  return {
+    provider: "xai-oauth",
+    access: "a",
+    refresh: "r",
+    expires: 123,
+    tokenEndpoint: "https://auth.x.ai/oauth2/token",
+    tokenType: "Bearer",
+    ...overrides,
+  }
 }
 
 describe("XaiOAuthPlugin", () => {
@@ -28,7 +51,6 @@ describe("XaiOAuthPlugin", () => {
       "xai_x_search",
     ])
   })
-
 
   test("adds Grok thinking metadata to the built-in xAI provider config", async () => {
     const plugin = await XaiOAuthPlugin(pluginCtx())
@@ -115,14 +137,11 @@ describe("XaiOAuthPlugin", () => {
   test("auth loader refreshes expired OAuth file instead of returning stale OpenCode access token", async () => {
     const dir = mkdtempSync(join(tmpdir(), "opencode-xai-oauth-"))
     process.env.OPENCODE_XAI_OAUTH_AUTH_FILE = join(dir, "auth.json")
-    writeStoredAuth({
-      provider: "xai-oauth",
+    writeStoredAuth(authFixture({
       access: "stale-file-access",
       refresh: "refresh-token",
       expires: Date.now() - 1_000,
-      tokenEndpoint: "https://auth.x.ai/oauth2/token",
-      tokenType: "Bearer",
-    })
+    }))
 
     let refreshBody = ""
     globalThis.fetch = (async (_url, init) => {
@@ -150,6 +169,7 @@ describe("XaiOAuthPlugin", () => {
 describe("xAI auth helpers", () => {
   afterEach(() => {
     delete process.env.OPENCODE_XAI_OAUTH_AUTH_FILE
+    delete process.env.XDG_CONFIG_HOME
     delete process.env.XAI_API_KEY
     delete process.env.XAI_BASE_URL
     globalThis.fetch = originalFetch
@@ -167,11 +187,34 @@ describe("xAI auth helpers", () => {
   test("stores auth file with restricted JSON payload", () => {
     const dir = mkdtempSync(join(tmpdir(), "opencode-xai-oauth-"))
     process.env.OPENCODE_XAI_OAUTH_AUTH_FILE = join(dir, "auth.json")
-    writeStoredAuth({ provider: "xai-oauth", access: "a", refresh: "r", expires: 123, tokenEndpoint: "https://auth.x.ai/oauth2/token", tokenType: "Bearer" })
+    writeStoredAuth(authFixture())
     expect(authPath()).toBe(join(dir, "auth.json"))
     expect(existsSync(authPath())).toBe(true)
     expect(readStoredAuth()?.access).toBe("a")
     expect(readFileSync(authPath(), "utf8")).toContain("xai-oauth")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("defaults OAuth storage under the OpenCode config directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opencode-xai-oauth-"))
+    process.env.XDG_CONFIG_HOME = dir
+
+    expect(authPath()).toBe(join(dir, "opencode", "xai-oauth", "auth.json"))
+    writeStoredAuth(authFixture())
+
+    expect(existsSync(defaultAuthPath())).toBe(true)
+    expect(readStoredAuth()?.access).toBe("a")
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("reads legacy auth file when the new OpenCode config auth file is absent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opencode-xai-oauth-"))
+    process.env.XDG_CONFIG_HOME = dir
+
+    writeStoredAuth(authFixture({ access: "legacy" }), legacyAuthPath())
+
+    expect(defaultAuthPath()).toBe(join(dir, "opencode", "xai-oauth", "auth.json"))
+    expect(readStoredAuth()?.access).toBe("legacy")
     rmSync(dir, { recursive: true, force: true })
   })
 

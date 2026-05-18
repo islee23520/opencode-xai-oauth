@@ -34,11 +34,30 @@ type TokenPayload = { access_token?: string; refresh_token?: string; expires_in?
 
 type CallbackResult = { code?: string; state?: string; error?: string; error_description?: string }
 
-export function authPath() {
-  return process.env.OPENCODE_XAI_OAUTH_AUTH_FILE || join(homedir(), ".config", "opencode-xai-oauth", "auth.json")
+function configHome() {
+  return process.env.XDG_CONFIG_HOME || join(homedir(), ".config")
 }
 
-export function readStoredAuth(path = authPath()): StoredAuth | undefined {
+export function defaultAuthPath() {
+  return join(configHome(), "opencode", "xai-oauth", "auth.json")
+}
+
+export function legacyAuthPath() {
+  return join(configHome(), "opencode-xai-oauth", "auth.json")
+}
+
+export function authPath() {
+  return process.env.OPENCODE_XAI_OAUTH_AUTH_FILE || defaultAuthPath()
+}
+
+function readableAuthPath() {
+  const configured = authPath()
+  if (process.env.OPENCODE_XAI_OAUTH_AUTH_FILE || existsSync(configured)) return configured
+  const legacy = legacyAuthPath()
+  return existsSync(legacy) ? legacy : configured
+}
+
+export function readStoredAuth(path = readableAuthPath()): StoredAuth | undefined {
   if (!existsSync(path)) return undefined
   try {
     const data = JSON.parse(readFileSync(path, "utf8")) as Partial<StoredAuth>

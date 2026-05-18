@@ -2,7 +2,18 @@
 
 OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, image generation, and video generation.
 
-Current release: `v0.1.1`.
+Current release: `v1.1.3`.
+
+
+## Release notes
+
+### v1.1.3
+
+- Stores OAuth credentials in the OpenCode config area by default: `~/.config/opencode/xai-oauth/auth.json`.
+- Preserves compatibility with the previous `~/.config/opencode-xai-oauth/auth.json` location when the new file is absent.
+- Keeps `OPENCODE_XAI_OAUTH_AUTH_FILE` as the highest-priority custom auth-file override.
+- Refreshes expired OAuth credentials before returning xAI provider credentials to avoid stale Grok sessions.
+- Adds regression coverage for OAuth refresh and auth-file path behavior.
 
 ## Unofficial / Use at your own risk
 
@@ -29,10 +40,9 @@ This project does not provide legal advice and does not guarantee that any parti
   - `xai_image_generate`
   - `xai_tts`
   - `xai_video_generate`
-  - `xai_video_generate`
 
 
-## Supported features in v0.0.1
+## Supported features in v1.1.3
 
 | Area | What works | Notes |
 | --- | --- | --- |
@@ -100,6 +110,14 @@ opencode-xai-oauth login
 # or during local development:
 bun run src/cli.ts login
 ```
+
+OAuth tokens are stored under the OpenCode config area by default:
+
+```text
+~/.config/opencode/xai-oauth/auth.json
+```
+
+Existing installs with the previous `~/.config/opencode-xai-oauth/auth.json` file keep working; the plugin reads that legacy file when the new OpenCode config file is absent. To force a custom path, set `OPENCODE_XAI_OAUTH_AUTH_FILE`.
 
 API key fallback:
 

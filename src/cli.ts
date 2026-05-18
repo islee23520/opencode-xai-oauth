@@ -15,7 +15,7 @@ function openBrowser(url: string) {
 const program = new Command()
   .name("opencode-xai-oauth")
   .description("xAI OAuth and tool support for OpenCode")
-  .version("0.1.2")
+  .version("1.1.3")
 
 program
   .command("login")
