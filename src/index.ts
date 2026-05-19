@@ -14,8 +14,7 @@ import {
 } from "./xai";
 
 const MAX_HANDLES = 10;
-const HANDLE_REGEX = /^@/;
-
+const HANDLE_REGEX = /^@+/;
 const GROK_REASONING_EFFORTS = ["low", "medium", "high"] as const;
 
 type GrokReasoningEffort = (typeof GROK_REASONING_EFFORTS)[number];
@@ -339,6 +338,11 @@ export const plugin: Plugin = async (ctx) => {
       loader: async (auth) => {
         const current = await auth();
         if (current.type === "oauth") {
+          const stored = readStoredAuth();
+          if (stored?.access) {
+            const refreshed = await resolveXaiCredentials();
+            return { apiKey: refreshed.apiKey, baseURL: refreshed.baseUrl };
+          }
           return { apiKey: current.access, baseURL: XAI_BASE_URL };
         }
         if (current.type === "api") {
@@ -638,7 +642,7 @@ export const plugin: Plugin = async (ctx) => {
 
           // Attach the generated video so OpenCode (OpenTUI) can show it in a nice popup/media player.
           // Download locally under .opencode/artifacts/ for a stable file after generation.
-          const videoUrl = data?.video?.url;
+          const videoUrl = data.video?.url;
           if (videoUrl) {
             try {
               const localPath = await downloadMediaToArtifacts(
@@ -659,7 +663,7 @@ export const plugin: Plugin = async (ctx) => {
                 ],
               };
             } catch {
-              // fallback to remote URL
+              // Fallback to the JSON response when local download fails.
             }
           }
           return JSON.stringify(result, null, 2);

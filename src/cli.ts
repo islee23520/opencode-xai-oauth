@@ -18,11 +18,10 @@ function openBrowser(url: string) {
   } else {
     command = "xdg-open";
   }
-
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
   const child = spawn(command, args, { stdio: "ignore", detached: true });
   child.on("error", () => {
-    // ignore
+    // Best-effort browser launch only.
   });
   child.unref();
 }
@@ -30,7 +29,7 @@ function openBrowser(url: string) {
 const program = new Command()
   .name("opencode-xai-oauth")
   .description("xAI OAuth and tool support for OpenCode")
-  .version("0.1.0");
+  .version("1.1.3");
 
 program
   .command("login")

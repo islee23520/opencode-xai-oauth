@@ -42,10 +42,6 @@ interface TokenPayload {
   token_type?: string;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 interface CallbackResult {
   code?: string;
   error?: string;
@@ -53,14 +49,38 @@ interface CallbackResult {
   state?: string;
 }
 
-export function authPath() {
-  return (
-    process.env.OPENCODE_XAI_OAUTH_AUTH_FILE ||
-    join(homedir(), ".config", "opencode-xai-oauth", "auth.json")
-  );
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function readStoredAuth(path = authPath()): StoredAuth | undefined {
+function configHome() {
+  return process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+}
+
+export function defaultAuthPath() {
+  return join(configHome(), "opencode", "xai-oauth", "auth.json");
+}
+
+export function legacyAuthPath() {
+  return join(configHome(), "opencode-xai-oauth", "auth.json");
+}
+
+export function authPath() {
+  return process.env.OPENCODE_XAI_OAUTH_AUTH_FILE || defaultAuthPath();
+}
+
+function readableAuthPath() {
+  const configured = authPath();
+  if (process.env.OPENCODE_XAI_OAUTH_AUTH_FILE || existsSync(configured)) {
+    return configured;
+  }
+  const legacy = legacyAuthPath();
+  return existsSync(legacy) ? legacy : configured;
+}
+
+export function readStoredAuth(
+  path = readableAuthPath()
+): StoredAuth | undefined {
   if (!existsSync(path)) {
     return;
   }
