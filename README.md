@@ -2,10 +2,17 @@
 
 OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, image generation, and video generation.
 
-Current release: `v1.1.3`.
+Current release: `v1.1.4`.
 
 
 ## Release notes
+
+### v1.1.4
+
+- Adds Biome/Ultracite linting and formatting configuration.
+- Adds `lint`, `lint:fix`, and `format` scripts for local development.
+- Adds GitHub Actions CI for frozen install, lint, typecheck, tests, and build.
+- Keeps the v1.1.3 OAuth refresh/storage fixes intact after resolving PR #1 against current `main`.
 
 ### v1.1.3
 
@@ -42,7 +49,7 @@ This project does not provide legal advice and does not guarantee that any parti
   - `xai_video_generate`
 
 
-## Supported features in v1.1.3
+## Supported features in v1.1.4
 
 | Area | What works | Notes |
 | --- | --- | --- |
@@ -186,6 +193,7 @@ The plugin patches OpenCode config metadata for the existing `xai` provider inst
 
 ```bash
 bun install
+bun run lint
 bun test
 bun run typecheck
 bun run build
