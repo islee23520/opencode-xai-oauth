@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { Command } from "commander";
+import { PACKAGE_VERSION } from "./version";
 import {
   authPath,
   beginOAuth,
@@ -29,7 +30,7 @@ function openBrowser(url: string) {
 const program = new Command()
   .name("opencode-xai-oauth")
   .description("xAI OAuth and tool support for OpenCode")
-  .version("1.1.3");
+  .version(PACKAGE_VERSION);
 
 program
   .command("login")

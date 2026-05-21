@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { plugin as XaiOAuthPlugin } from "../src/index";
+import { PACKAGE_VERSION } from "../src/version";
 import {
   authPath,
   defaultAuthPath,
@@ -38,7 +39,62 @@ function authFixture(overrides: Partial<StoredAuth> = {}): StoredAuth {
   };
 }
 
+const originalFetch = globalThis.fetch;
+const tempDirs: string[] = [];
+
+function useTempAuthFile(fileName = "auth.json") {
+  const dir = mkdtempSync(join(tmpdir(), "opencode-xai-oauth-"));
+  tempDirs.push(dir);
+  process.env.OPENCODE_XAI_OAUTH_AUTH_FILE = join(dir, fileName);
+  return dir;
+}
+
+async function applyChatHeaders(
+  providerID: string,
+  headers: Record<string, string> = {}
+) {
+  const plugin = await XaiOAuthPlugin(pluginCtx());
+  const output = { headers } as { headers: Record<string, string> };
+  await plugin["chat.headers"]?.(
+    {
+      model: {
+        providerID,
+        modelID: providerID === "xai" ? "grok-4.3" : "gpt-test",
+      },
+      provider: { id: providerID },
+      message: {},
+    } as never,
+    output as never
+  );
+  return output.headers;
+}
+
+async function applyShellEnv(env: Record<string, string> = {}) {
+  const plugin = await XaiOAuthPlugin(pluginCtx());
+  await plugin["shell.env"]?.({} as never, { env } as never);
+  return env;
+}
+
+afterEach(() => {
+  while (tempDirs.length) {
+    rmSync(tempDirs.pop() as string, { recursive: true, force: true });
+  }
+  delete process.env.OPENCODE_XAI_OAUTH_AUTH_FILE;
+  delete process.env.XDG_CONFIG_HOME;
+  delete process.env.XAI_API_KEY;
+  delete process.env.XAI_BASE_URL;
+  globalThis.fetch = originalFetch;
+});
+
 describe("XaiOAuthPlugin", () => {
+  test("keeps source package version in sync with package metadata", () => {
+    const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
+      version: string;
+    };
+
+    expect(PACKAGE_VERSION).toBe(packageJson.version);
+  });
+
   test("exports OpenCode auth/provider/tools hooks", async () => {
     const plugin = await XaiOAuthPlugin(pluginCtx());
 
@@ -153,8 +209,7 @@ describe("XaiOAuthPlugin", () => {
   });
 
   test("status tool reports missing credentials without throwing", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "opencode-xai-oauth-"));
-    process.env.OPENCODE_XAI_OAUTH_AUTH_FILE = join(dir, "auth.json");
+    useTempAuthFile();
     delete process.env.XAI_API_KEY;
     const plugin = await XaiOAuthPlugin(pluginCtx());
     const result = await plugin.tool?.xai_status.execute({}, {
@@ -162,13 +217,10 @@ describe("XaiOAuthPlugin", () => {
       worktree: process.cwd(),
     } as never);
     expect(String(result)).toContain("credentials not found");
-    rmSync(dir, { recursive: true, force: true });
-    delete process.env.OPENCODE_XAI_OAUTH_AUTH_FILE;
   });
 
   test("auth loader refreshes expired OAuth file instead of returning stale OpenCode access token", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "opencode-xai-oauth-"));
-    process.env.OPENCODE_XAI_OAUTH_AUTH_FILE = join(dir, "auth.json");
+    useTempAuthFile();
     writeStoredAuth(
       authFixture({
         access: "stale-file-access",
@@ -215,22 +267,136 @@ describe("XaiOAuthPlugin", () => {
     }
     expect(loaded.apiKey).toBe("fresh-access");
     expect(readStoredAuth()?.access).toBe("fresh-access");
-    rmSync(dir, { recursive: true, force: true });
-    delete process.env.OPENCODE_XAI_OAUTH_AUTH_FILE;
+  });
+
+  test("chat headers reload expired OAuth credentials at runtime", async () => {
+    useTempAuthFile();
+    writeStoredAuth(
+      authFixture({
+        access: "expired-chat-access",
+        refresh: "runtime-refresh-token",
+        expires: Date.now() - 1000,
+      })
+    );
+
+    const refreshBodies: string[] = [];
+    globalThis.fetch = ((
+      _url: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1]
+    ) => {
+      refreshBodies.push(String(init?.body || ""));
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            access_token: "fresh-chat-access",
+            refresh_token: "rotated-runtime-refresh-token",
+            expires_in: 3600,
+            token_type: "Bearer",
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }
+        )
+      );
+    }) as unknown as typeof fetch;
+
+    const headers = await applyChatHeaders("xai", { "x-existing": "kept" });
+
+    expect(refreshBodies).toHaveLength(1);
+    expect(refreshBodies[0]).toContain("grant_type=refresh_token");
+    expect(headers.Authorization).toBe("Bearer fresh-chat-access");
+    expect(headers["x-existing"]).toBe("kept");
+    expect(readStoredAuth()?.access).toBe("fresh-chat-access");
+    expect(readStoredAuth()?.refresh).toBe("rotated-runtime-refresh-token");
+  });
+
+  test("chat headers do not break OpenCode-managed auth when no reloadable credentials exist", async () => {
+    useTempAuthFile("missing-auth.json");
+    delete process.env.XAI_API_KEY;
+    const headers = await applyChatHeaders("xai", {
+      Authorization: "Bearer opencode-managed-token",
+    });
+
+    expect(headers.Authorization).toBe("Bearer opencode-managed-token");
+  });
+
+  test("chat headers can use API-key credentials at runtime", async () => {
+    useTempAuthFile("missing-auth.json");
+    process.env.XAI_API_KEY = "xai-runtime-api-key";
+
+    const headers = await applyChatHeaders("xai");
+
+    expect(headers.Authorization).toBe("Bearer xai-runtime-api-key");
+  });
+
+  test("chat headers fail closed when expired OAuth refresh fails at runtime", async () => {
+    useTempAuthFile();
+    writeStoredAuth(
+      authFixture({
+        access: "expired-chat-access",
+        refresh: "bad-runtime-refresh-token",
+        expires: Date.now() - 1000,
+      })
+    );
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response("invalid refresh", { status: 401 })
+      )) as unknown as typeof fetch;
+
+    const output = {
+      headers: { Authorization: "Bearer stale-runtime-token" },
+    } as {
+      headers: Record<string, string>;
+    };
+
+    await expect(applyChatHeaders("xai", output.headers)).rejects.toThrow(
+      "xAI token refresh failed"
+    );
+    expect(output.headers.Authorization).toBe("Bearer stale-runtime-token");
+  });
+
+  test("chat headers do not touch non-xAI providers", async () => {
+    let fetchCalled = false;
+    globalThis.fetch = (() => {
+      fetchCalled = true;
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as unknown as typeof fetch;
+    const headers = await applyChatHeaders("openai");
+
+    expect(fetchCalled).toBe(false);
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  test("shell env preserves OpenCode shell env when no plugin-managed credentials exist", async () => {
+    useTempAuthFile("missing-auth.json");
+
+    const env = await applyShellEnv({ EXISTING: "kept" });
+
+    expect(env.EXISTING).toBe("kept");
+    expect(env.XAI_API_KEY).toBeUndefined();
+    expect(env.XAI_BASE_URL).toBeUndefined();
+  });
+
+  test("shell env fail closes when expired OAuth refresh fails", async () => {
+    useTempAuthFile();
+    writeStoredAuth(
+      authFixture({
+        access: "expired-shell-access",
+        refresh: "bad-shell-refresh-token",
+        expires: Date.now() - 1000,
+      })
+    );
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response("invalid refresh", { status: 401 })
+      )) as unknown as typeof fetch;
+
+    await expect(applyShellEnv()).rejects.toThrow("xAI token refresh failed");
   });
 });
 
 describe("xAI auth helpers", () => {
-  afterEach(() => {
-    delete process.env.OPENCODE_XAI_OAUTH_AUTH_FILE;
-    delete process.env.XDG_CONFIG_HOME;
-    delete process.env.XAI_API_KEY;
-    delete process.env.XAI_BASE_URL;
-    globalThis.fetch = originalFetch;
-  });
-
-  const originalFetch = globalThis.fetch;
-
   test("generates PKCE verifier and challenge", () => {
     const pair = pkcePair();
     expect(pair.verifier.length).toBeGreaterThan(20);
@@ -286,12 +452,14 @@ describe("xAI auth helpers", () => {
     process.env.XAI_API_KEY = "xai-test";
     let requestUrl = "";
     let requestBody = {} as Record<string, unknown>;
+    let requestHeaders = {} as Record<string, string>;
     globalThis.fetch = ((
       url: Parameters<typeof fetch>[0],
       init?: Parameters<typeof fetch>[1]
     ) => {
       requestUrl = String(url);
       requestBody = JSON.parse(String(init?.body));
+      requestHeaders = (init?.headers as Record<string, string>) || {};
       return Promise.resolve(
         new Response(
           JSON.stringify({ data: [{ url: "https://example.test/image.jpg" }] }),
@@ -307,6 +475,9 @@ describe("xAI auth helpers", () => {
     expect(requestBody.prompt).toBe("tiny test image");
     expect(requestBody.resolution).toBe("1k");
     expect(requestBody.size).toBeUndefined();
+    expect(requestHeaders["User-Agent"]).toBe(
+      `opencode-xai-oauth/${PACKAGE_VERSION}`
+    );
   });
 
   test("uses current xAI TTS endpoint and payload", async () => {
