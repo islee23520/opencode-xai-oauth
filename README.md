@@ -2,10 +2,17 @@
 
 OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, image generation, and video generation.
 
-Current release: `v1.1.4`.
+Current release: `v1.1.5`.
 
 
 ## Release notes
+
+### v1.1.5
+
+- Adds runtime `chat.headers` credential reload so expired OAuth tokens refresh during active xAI/Grok chat use without restarting OpenCode.
+- Preserves OpenCode-managed xAI auth when this plugin has no reloadable OAuth/API-key credentials.
+- Fails closed when an expired OAuth refresh fails instead of silently reusing stale plugin-managed credentials.
+- Keeps package, CLI, and request user-agent version metadata aligned for release diagnostics.
 
 ### v1.1.4
 
@@ -49,7 +56,7 @@ This project does not provide legal advice and does not guarantee that any parti
   - `xai_video_generate`
 
 
-## Supported features in v1.1.4
+## Supported features in v1.1.5
 
 | Area | What works | Notes |
 | --- | --- | --- |

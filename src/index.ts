@@ -246,13 +246,16 @@ function applyGrokReasoningParams(input: unknown, output: unknown) {
   options.reasoning_effort = effort;
 }
 
+function hasPluginManagedXaiCredentials() {
+  const stored = readStoredAuth();
+  return Boolean(stored?.access || (process.env.XAI_API_KEY || "").trim());
+}
+
 async function applyRuntimeXaiAuthHeaders(input: unknown, output: unknown) {
   if (!isRecord(output) || inputProviderID(input) !== "xai") {
     return;
   }
-  const stored = readStoredAuth();
-  const hasApiKey = Boolean((process.env.XAI_API_KEY || "").trim());
-  if (!(stored?.access || hasApiKey)) {
+  if (!hasPluginManagedXaiCredentials()) {
     return;
   }
   const creds = await resolveXaiCredentials();
@@ -689,13 +692,12 @@ export const plugin: Plugin = async (ctx) => {
       }),
     },
     "shell.env": async (_input, output) => {
-      try {
-        const creds = await resolveXaiCredentials();
-        output.env.XAI_API_KEY = creds.apiKey;
-        output.env.XAI_BASE_URL = creds.baseUrl;
-      } catch {
-        // No credentials yet; keep shell unchanged.
+      if (!hasPluginManagedXaiCredentials()) {
+        return;
       }
+      const creds = await resolveXaiCredentials();
+      output.env.XAI_API_KEY = creds.apiKey;
+      output.env.XAI_BASE_URL = creds.baseUrl;
     },
     event: async ({ event }) => {
       if (event.type === "server.connected") {

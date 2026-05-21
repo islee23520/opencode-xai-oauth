@@ -1,6 +1,6 @@
 {
   "name": "opencode-xai-oauth",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, image generation, and video generation.",
   "type": "module",
   "main": "./dist/index.js",

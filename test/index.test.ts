@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { plugin as XaiOAuthPlugin } from "../src/index";
+import { PACKAGE_VERSION } from "../src/version";
 import {
   authPath,
   defaultAuthPath,
@@ -68,6 +69,12 @@ async function applyChatHeaders(
   return output.headers;
 }
 
+async function applyShellEnv(env: Record<string, string> = {}) {
+  const plugin = await XaiOAuthPlugin(pluginCtx());
+  await plugin["shell.env"]?.({} as never, { env } as never);
+  return env;
+}
+
 afterEach(() => {
   while (tempDirs.length) {
     rmSync(tempDirs.pop() as string, { recursive: true, force: true });
@@ -80,6 +87,14 @@ afterEach(() => {
 });
 
 describe("XaiOAuthPlugin", () => {
+  test("keeps source package version in sync with package metadata", () => {
+    const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
+      version: string;
+    };
+
+    expect(PACKAGE_VERSION).toBe(packageJson.version);
+  });
+
   test("exports OpenCode auth/provider/tools hooks", async () => {
     const plugin = await XaiOAuthPlugin(pluginCtx());
 
@@ -352,6 +367,33 @@ describe("XaiOAuthPlugin", () => {
     expect(fetchCalled).toBe(false);
     expect(headers.Authorization).toBeUndefined();
   });
+
+  test("shell env preserves OpenCode shell env when no plugin-managed credentials exist", async () => {
+    useTempAuthFile("missing-auth.json");
+
+    const env = await applyShellEnv({ EXISTING: "kept" });
+
+    expect(env.EXISTING).toBe("kept");
+    expect(env.XAI_API_KEY).toBeUndefined();
+    expect(env.XAI_BASE_URL).toBeUndefined();
+  });
+
+  test("shell env fail closes when expired OAuth refresh fails", async () => {
+    useTempAuthFile();
+    writeStoredAuth(
+      authFixture({
+        access: "expired-shell-access",
+        refresh: "bad-shell-refresh-token",
+        expires: Date.now() - 1000,
+      })
+    );
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response("invalid refresh", { status: 401 })
+      )) as unknown as typeof fetch;
+
+    await expect(applyShellEnv()).rejects.toThrow("xAI token refresh failed");
+  });
 });
 
 describe("xAI auth helpers", () => {
@@ -410,12 +452,14 @@ describe("xAI auth helpers", () => {
     process.env.XAI_API_KEY = "xai-test";
     let requestUrl = "";
     let requestBody = {} as Record<string, unknown>;
+    let requestHeaders = {} as Record<string, string>;
     globalThis.fetch = ((
       url: Parameters<typeof fetch>[0],
       init?: Parameters<typeof fetch>[1]
     ) => {
       requestUrl = String(url);
       requestBody = JSON.parse(String(init?.body));
+      requestHeaders = (init?.headers as Record<string, string>) || {};
       return Promise.resolve(
         new Response(
           JSON.stringify({ data: [{ url: "https://example.test/image.jpg" }] }),
@@ -431,6 +475,9 @@ describe("xAI auth helpers", () => {
     expect(requestBody.prompt).toBe("tiny test image");
     expect(requestBody.resolution).toBe("1k");
     expect(requestBody.size).toBeUndefined();
+    expect(requestHeaders["User-Agent"]).toBe(
+      `opencode-xai-oauth/${PACKAGE_VERSION}`
+    );
   });
 
   test("uses current xAI TTS endpoint and payload", async () => {

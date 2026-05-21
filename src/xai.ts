@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { PACKAGE_VERSION } from "./version";
 
 export const XAI_BASE_URL = "https://api.x.ai/v1";
 export const XAI_OAUTH_ISSUER = "https://auth.x.ai";
@@ -372,7 +373,7 @@ async function xaiFetch(path: string, init: RequestInit = {}) {
       ...init,
       headers: {
         Authorization: `Bearer ${creds.apiKey}`,
-        "User-Agent": "opencode-xai-oauth/0.1",
+        "User-Agent": `opencode-xai-oauth/${PACKAGE_VERSION}`,
         ...(init.body && !(init.body instanceof FormData)
           ? { "Content-Type": "application/json" }
           : {}),
