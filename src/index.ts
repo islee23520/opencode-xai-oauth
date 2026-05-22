@@ -1,9 +1,15 @@
 import type { Config, Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
+import { PACKAGE_VERSION } from "./version";
 import {
+  accessTokenIsExpiring,
+  beginDeviceOAuth,
   beginOAuth,
   downloadMediaToArtifacts,
+  oauthExpiry,
+  REFRESH_SKEW_MS,
   readStoredAuth,
+  refreshAccessToken,
   resolveXaiCredentials,
   saveBase64Image,
   XAI_BASE_URL,
@@ -16,6 +22,11 @@ import {
 const MAX_HANDLES = 10;
 const HANDLE_REGEX = /^@+/;
 const GROK_REASONING_EFFORTS = ["low", "medium", "high"] as const;
+const OAUTH_DUMMY_KEY = "opencode-xai-oauth";
+
+type LoaderAuth =
+  | { access: string; expires: number; refresh: string; type: "oauth" }
+  | { type: "api" | "wellknown" };
 
 type GrokReasoningEffort = (typeof GROK_REASONING_EFFORTS)[number];
 
@@ -251,6 +262,142 @@ function hasPluginManagedXaiCredentials() {
   return Boolean(stored?.access || (process.env.XAI_API_KEY || "").trim());
 }
 
+function mergedRequestHeaders(
+  requestInput: RequestInfo | URL,
+  init?: RequestInit
+) {
+  const headers = new Headers(
+    requestInput instanceof Request ? requestInput.headers : undefined
+  );
+  if (init?.headers) {
+    let entries: Iterable<[string, string | undefined]>;
+    if (init.headers instanceof Headers) {
+      entries = init.headers.entries();
+    } else if (Array.isArray(init.headers)) {
+      entries = init.headers;
+    } else {
+      entries = Object.entries(
+        init.headers as Record<string, string | undefined>
+      );
+    }
+    for (const [key, value] of entries) {
+      if (value !== undefined) {
+        headers.set(key, String(value));
+      }
+    }
+  }
+  return headers;
+}
+
+async function logPersistRefreshFailure(
+  ctx: Parameters<Plugin>[0],
+  error: unknown
+) {
+  await ctx.client.app
+    .log({
+      body: {
+        service: "opencode-xai-oauth",
+        level: "warn",
+        message: "Failed to persist refreshed xAI OAuth tokens",
+        extra: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+      },
+    })
+    .catch(() => undefined);
+}
+
+function ensurePluginUserAgent(headers: Headers) {
+  if (!headers.has("user-agent")) {
+    headers.set("user-agent", `opencode-xai-oauth/${PACKAGE_VERSION}`);
+  }
+}
+
+function fetchWithBearer(
+  requestInput: RequestInfo | URL,
+  init: RequestInit | undefined,
+  bearer: string
+) {
+  const headers = mergedRequestHeaders(requestInput, init);
+  headers.set("authorization", `Bearer ${bearer}`);
+  ensurePluginUserAgent(headers);
+  return fetch(requestInput, { ...init, headers });
+}
+
+function isLoaderOAuthAuth(
+  auth: LoaderAuth
+): auth is Extract<LoaderAuth, { type: "oauth" }> {
+  return auth.type === "oauth";
+}
+
+function oauthAuthExpiresSoon(auth: { access: string; expires: number }) {
+  return (
+    !auth.expires ||
+    auth.expires - Date.now() <= REFRESH_SKEW_MS ||
+    accessTokenIsExpiring(auth.access)
+  );
+}
+
+async function persistOpenCodeManagedRefresh(
+  ctx: Parameters<Plugin>[0],
+  refreshToken: string
+) {
+  const tokens = await refreshAccessToken(refreshToken);
+  const refreshed = {
+    access: tokens.access_token,
+    refresh: tokens.refresh_token || refreshToken,
+    expires: oauthExpiry(tokens.expires_in),
+  };
+  await Promise.resolve(
+    ctx.client.auth.set({
+      path: { id: "xai" },
+      body: {
+        type: "oauth",
+        access: refreshed.access,
+        refresh: refreshed.refresh,
+        expires: refreshed.expires,
+      },
+    })
+  ).catch((error) => logPersistRefreshFailure(ctx, error));
+  return refreshed;
+}
+
+function createXaiOAuthFetch(
+  ctx: Parameters<Plugin>[0],
+  auth: () => Promise<LoaderAuth>
+) {
+  let refreshPromise:
+    | Promise<{ access: string; expires: number; refresh: string }>
+    | undefined;
+
+  return async (requestInput: RequestInfo | URL, init?: RequestInit) => {
+    let currentAuth = await auth();
+    if (!isLoaderOAuthAuth(currentAuth)) {
+      return fetch(requestInput, init);
+    }
+
+    const stored = readStoredAuth();
+    if (stored?.access) {
+      const creds = await resolveXaiCredentials();
+      return fetchWithBearer(requestInput, init, creds.apiKey);
+    }
+
+    if (oauthAuthExpiresSoon(currentAuth)) {
+      if (!refreshPromise) {
+        refreshPromise = persistOpenCodeManagedRefresh(
+          ctx,
+          currentAuth.refresh
+        ).finally(() => {
+          refreshPromise = undefined;
+        });
+      }
+      currentAuth = { ...currentAuth, ...(await refreshPromise) };
+    }
+
+    return fetchWithBearer(requestInput, init, currentAuth.access);
+  };
+}
+
 async function applyRuntimeXaiAuthHeaders(input: unknown, output: unknown) {
   if (!isRecord(output) || inputProviderID(input) !== "xai") {
     return;
@@ -348,20 +495,17 @@ async function imageAttachments(
   return attachments;
 }
 
-export const plugin: Plugin = async (ctx) => {
-  await Promise.resolve();
-  return {
+export const plugin: Plugin = (ctx) =>
+  Promise.resolve({
     auth: {
       provider: "xai",
       loader: async (auth) => {
         const current = await auth();
         if (current.type === "oauth") {
-          const stored = readStoredAuth();
-          if (stored?.access) {
-            const refreshed = await resolveXaiCredentials();
-            return { apiKey: refreshed.apiKey, baseURL: refreshed.baseUrl };
-          }
-          return { apiKey: current.access, baseURL: XAI_BASE_URL };
+          return {
+            apiKey: OAUTH_DUMMY_KEY,
+            fetch: createXaiOAuthFetch(ctx, auth as () => Promise<LoaderAuth>),
+          };
         }
         if (current.type === "api") {
           return {
@@ -399,6 +543,32 @@ export const plugin: Plugin = async (ctx) => {
           },
         },
         {
+          type: "oauth",
+          label: "xAI OAuth (Headless / Remote / VPS)",
+          async authorize() {
+            const flow = await beginDeviceOAuth();
+            return {
+              method: "auto",
+              url: flow.url,
+              instructions: flow.instructions,
+              async callback() {
+                try {
+                  const auth = await flow.complete();
+                  return {
+                    type: "success",
+                    provider: "xai",
+                    refresh: auth.refresh,
+                    access: auth.access,
+                    expires: auth.expires,
+                  };
+                } catch {
+                  return { type: "failed" };
+                }
+              },
+            };
+          },
+        },
+        {
           type: "api",
           label: "xAI API key",
           prompts: [
@@ -409,29 +579,30 @@ export const plugin: Plugin = async (ctx) => {
               placeholder: "xai-...",
             },
           ],
-          async authorize(inputs) {
-            await Promise.resolve();
+          authorize(inputs) {
             const key = String(inputs?.apiKey || "").trim();
-            return key
-              ? {
-                  type: "success",
-                  provider: "xai",
-                  key,
-                  metadata: { baseURL: XAI_BASE_URL },
-                }
-              : { type: "failed" };
+            return Promise.resolve(
+              key
+                ? {
+                    type: "success",
+                    provider: "xai",
+                    key,
+                    metadata: { baseURL: XAI_BASE_URL },
+                  }
+                : { type: "failed" }
+            );
           },
         },
       ],
     },
-    config: async (config) => {
-      await Promise.resolve();
+    config: (config) => {
       applyGrokThinkingConfig(config as MutableConfig);
       applyXaiSkillCommands(config as MutableConfig);
+      return Promise.resolve();
     },
-    "chat.params": async (input, output) => {
-      await Promise.resolve();
+    "chat.params": (input, output) => {
       applyGrokReasoningParams(input, output);
+      return Promise.resolve();
     },
     "chat.headers": async (input, output) => {
       await applyRuntimeXaiAuthHeaders(input, output);
@@ -661,8 +832,6 @@ export const plugin: Plugin = async (ctx) => {
           const data = (await xaiVideoGenerate(args)) as VideoGenerationResult;
           const result: Record<string, unknown> = { success: true, ...data };
 
-          // Attach the generated video so OpenCode (OpenTUI) can show it in a nice popup/media player.
-          // Download locally under .opencode/artifacts/ for a stable file after generation.
           const videoUrl = data.video?.url;
           if (videoUrl) {
             try {
@@ -684,7 +853,7 @@ export const plugin: Plugin = async (ctx) => {
                 ],
               };
             } catch {
-              // Fallback to the JSON response when local download fails.
+              return JSON.stringify(result, null, 2);
             }
           }
           return JSON.stringify(result, null, 2);
@@ -696,8 +865,10 @@ export const plugin: Plugin = async (ctx) => {
         return;
       }
       const creds = await resolveXaiCredentials();
-      output.env.XAI_API_KEY = creds.apiKey;
-      output.env.XAI_BASE_URL = creds.baseUrl;
+      const env = output.env ?? {};
+      env.XAI_API_KEY = creds.apiKey;
+      env.XAI_BASE_URL = creds.baseUrl;
+      output.env = env;
     },
     event: async ({ event }) => {
       if (event.type === "server.connected") {
@@ -709,12 +880,9 @@ export const plugin: Plugin = async (ctx) => {
               message: "xAI OAuth plugin loaded",
             },
           })
-          .catch(() => {
-            // Logging is best-effort only.
-          });
+          .catch(() => undefined);
       }
     },
-  };
-};
+  });
 
 export default plugin;

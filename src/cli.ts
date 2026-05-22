@@ -5,6 +5,7 @@ import { Command } from "commander";
 import { PACKAGE_VERSION } from "./version";
 import {
   authPath,
+  beginDeviceOAuth,
   beginOAuth,
   readStoredAuth,
   resolveXaiCredentials,
@@ -21,9 +22,7 @@ function openBrowser(url: string) {
   }
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
   const child = spawn(command, args, { stdio: "ignore", detached: true });
-  child.on("error", () => {
-    // Best-effort browser launch only.
-  });
+  child.on("error", () => undefined);
   child.unref();
 }
 
@@ -38,17 +37,27 @@ program
     "Start the xAI OAuth login flow and save credentials for OpenCode tools"
   )
   .option(
+    "--device",
+    "use device-code login for headless / remote / VPS environments"
+  )
+  .option(
     "--no-browser",
     "print the URL instead of opening the default browser"
   )
-  .action(async (options: { browser: boolean }) => {
+  .action(async (options: { browser: boolean; device: boolean }) => {
     try {
-      const flow = await beginOAuth();
+      const flow = options.device
+        ? await beginDeviceOAuth()
+        : await beginOAuth();
       console.log(`Open this xAI OAuth URL:\n${flow.url}\n`);
       if (options.browser) {
         openBrowser(flow.url);
       }
-      console.log("Waiting for browser callback on localhost...");
+      console.log(
+        options.device
+          ? "Waiting for xAI device authorization to complete..."
+          : "Waiting for browser callback on localhost..."
+      );
       const auth = await flow.complete();
       console.log(`Saved xAI OAuth token to ${authPath()}`);
       console.log(

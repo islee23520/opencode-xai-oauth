@@ -8,6 +8,9 @@ import { PACKAGE_VERSION } from "./version";
 export const XAI_BASE_URL = "https://api.x.ai/v1";
 export const XAI_OAUTH_ISSUER = "https://auth.x.ai";
 export const XAI_OAUTH_DISCOVERY_URL = `${XAI_OAUTH_ISSUER}/.well-known/openid-configuration`;
+export const XAI_OAUTH_AUTHORIZE_URL = `${XAI_OAUTH_ISSUER}/oauth2/authorize`;
+export const XAI_OAUTH_TOKEN_URL = `${XAI_OAUTH_ISSUER}/oauth2/token`;
+export const XAI_OAUTH_DEVICE_AUTHORIZATION_URL = `${XAI_OAUTH_ISSUER}/oauth2/device/code`;
 export const XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 export const XAI_OAUTH_SCOPE =
   "openid profile email offline_access grok-cli:access api:access";
@@ -15,7 +18,122 @@ export const XAI_OAUTH_REDIRECT_HOST = "127.0.0.1";
 export const XAI_OAUTH_REDIRECT_PORT = 56_121;
 export const XAI_OAUTH_REDIRECT_PATH = "/callback";
 export const REFRESH_SKEW_MS = 2 * 60 * 1000;
+const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
+const DEVICE_CODE_DEFAULT_INTERVAL_MS = 5000;
+const DEVICE_CODE_MIN_INTERVAL_MS = 1000;
+const DEVICE_CODE_SLOW_DOWN_INCREMENT_MS = 5000;
+const DEVICE_CODE_DEFAULT_EXPIRES_MS = 5 * 60 * 1000;
+const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000;
 const TRAILING_SLASH_REGEX = /\/$/;
+
+function escapeHtmlValue(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return char;
+    }
+  });
+}
+
+const HTML_SUCCESS = `<!doctype html>
+<html>
+  <head>
+    <title>OpenCode - xAI Authorization Successful</title>
+    <style>
+      body {
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+        background: #131010;
+        color: #f1ecec;
+      }
+      .container {
+        text-align: center;
+        padding: 2rem;
+      }
+      h1 {
+        color: #f1ecec;
+        margin-bottom: 1rem;
+      }
+      p {
+        color: #b7b1b1;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Authorization Successful</h1>
+      <p>You can close this window and return to OpenCode.</p>
+    </div>
+    <script>
+      setTimeout(() => window.close(), 2000)
+    </script>
+  </body>
+</html>`;
+
+const HTML_ERROR = (error: string) => `<!doctype html>
+<html>
+  <head>
+    <title>OpenCode - xAI Authorization Failed</title>
+    <style>
+      body {
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+        background: #131010;
+        color: #f1ecec;
+      }
+      .container {
+        text-align: center;
+        padding: 2rem;
+      }
+      h1 {
+        color: #fc533a;
+        margin-bottom: 1rem;
+      }
+      p {
+        color: #b7b1b1;
+      }
+      .error {
+        color: #ff917b;
+        font-family: monospace;
+        margin-top: 1rem;
+        padding: 1rem;
+        background: #3c140d;
+        border-radius: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Authorization Failed</h1>
+      <p>An error occurred during authorization.</p>
+      <div class="error">${escapeHtmlValue(error)}</div>
+    </div>
+  </body>
+</html>`;
 
 export interface StoredAuth {
   access: string;
@@ -32,8 +150,18 @@ export interface XaiCredentials {
   provider: "xai-oauth" | "xai";
 }
 
+export interface DeviceCodeResponse {
+  device_code: string;
+  expires_in?: number;
+  interval?: number;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+}
+
 interface Discovery {
   authorization_endpoint: string;
+  device_authorization_endpoint?: string;
   token_endpoint: string;
 }
 interface TokenPayload {
@@ -48,6 +176,11 @@ interface CallbackResult {
   error?: string;
   error_description?: string;
   state?: string;
+}
+
+interface DeviceTokenErrorBody {
+  error?: string;
+  error_description?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -114,6 +247,78 @@ export function pkcePair() {
   return { verifier, challenge };
 }
 
+function authHeaders() {
+  return {
+    "Content-Type": "application/x-www-form-urlencoded",
+    Accept: "application/json",
+    "User-Agent": `opencode-xai-oauth/${PACKAGE_VERSION}`,
+  };
+}
+
+export function oauthExpiry(timestampSeconds?: number) {
+  return Date.now() + Number(timestampSeconds || 3600) * 1000;
+}
+
+export function buildAuthorizeUrl(args: {
+  authorizationEndpoint: string;
+  challenge: string;
+  nonce: string;
+  redirectUri: string;
+  state: string;
+}) {
+  const url = new URL(args.authorizationEndpoint);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", XAI_OAUTH_CLIENT_ID);
+  url.searchParams.set("redirect_uri", args.redirectUri);
+  url.searchParams.set("scope", XAI_OAUTH_SCOPE);
+  url.searchParams.set("code_challenge", args.challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("state", args.state);
+  url.searchParams.set("nonce", args.nonce);
+  url.searchParams.set("plan", "generic");
+  url.searchParams.set("referrer", "opencode");
+  return url.toString();
+}
+
+export function accessTokenIsExpiring(
+  token: string | undefined,
+  skewMs: number = REFRESH_SKEW_MS
+): boolean {
+  if (!token || typeof token !== "string") {
+    return false;
+  }
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return false;
+  }
+  try {
+    let payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (payload.length % 4 !== 0) {
+      payload += "=";
+    }
+    const claims = JSON.parse(
+      Buffer.from(payload, "base64").toString("utf8")
+    ) as {
+      exp?: unknown;
+    };
+    if (typeof claims.exp !== "number") {
+      return false;
+    }
+    return claims.exp * 1000 <= Date.now() + Math.max(0, skewMs);
+  } catch {
+    return false;
+  }
+}
+
+function positiveSecondsToMs(value: unknown, defaultMs: number) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : defaultMs;
+}
+
+export function escapeHtml(value: string): string {
+  return escapeHtmlValue(value);
+}
+
 function validateXaiEndpoint(url: string) {
   const parsed = new URL(url);
   const host = parsed.hostname.toLowerCase();
@@ -130,7 +335,10 @@ function validateXaiEndpoint(url: string) {
 
 export async function discoverXaiOAuth(): Promise<Discovery> {
   const response = await fetch(XAI_OAUTH_DISCOVERY_URL, {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "User-Agent": `opencode-xai-oauth/${PACKAGE_VERSION}`,
+    },
   });
   if (!response.ok) {
     throw new Error(
@@ -142,7 +350,12 @@ export async function discoverXaiOAuth(): Promise<Discovery> {
     throw new Error("xAI OAuth discovery response missing endpoints");
   }
   return {
-    authorization_endpoint: validateXaiEndpoint(data.authorization_endpoint),
+    authorization_endpoint: validateXaiEndpoint(
+      data.authorization_endpoint || XAI_OAUTH_AUTHORIZE_URL
+    ),
+    device_authorization_endpoint: data.device_authorization_endpoint
+      ? validateXaiEndpoint(data.device_authorization_endpoint)
+      : XAI_OAUTH_DEVICE_AUTHORIZATION_URL,
     token_endpoint: validateXaiEndpoint(data.token_endpoint),
   };
 }
@@ -196,9 +409,16 @@ export async function startCallbackServer(
       };
       resolveCallback(result);
       writeCors();
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      const hasError = Boolean(result.error);
+      res.writeHead(hasError ? 400 : 200, {
+        "Content-Type": "text/html; charset=utf-8",
+      });
       res.end(
-        "<html><body><h1>xAI OAuth complete</h1><p>You can close this tab and return to OpenCode.</p></body></html>"
+        hasError
+          ? HTML_ERROR(
+              result.error_description || result.error || "Unknown error"
+            )
+          : HTML_SUCCESS
       );
     });
     server.once("error", reject);
@@ -237,10 +457,7 @@ export async function exchangeCodeForToken(
   });
   const response = await fetch(tokenEndpoint, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-    },
+    headers: authHeaders(),
     body,
   });
   if (!response.ok) {
@@ -256,25 +473,24 @@ export async function exchangeCodeForToken(
     provider: "xai-oauth",
     access: token.access_token,
     refresh: token.refresh_token,
-    expires:
-      Date.now() + Number(token.expires_in || 3600) * 1000 - REFRESH_SKEW_MS,
+    expires: oauthExpiry(token.expires_in),
     tokenEndpoint,
     tokenType: token.token_type || "Bearer",
   };
 }
 
-export async function refreshStoredAuth(auth: StoredAuth): Promise<StoredAuth> {
+export async function refreshAccessToken(
+  refreshToken: string,
+  tokenEndpoint = XAI_OAUTH_TOKEN_URL
+): Promise<TokenPayload & { access_token: string }> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     client_id: XAI_OAUTH_CLIENT_ID,
-    refresh_token: auth.refresh,
+    refresh_token: refreshToken,
   });
-  const response = await fetch(auth.tokenEndpoint, {
+  const response = await fetch(tokenEndpoint, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-    },
+    headers: authHeaders(),
     body,
   });
   if (!response.ok) {
@@ -286,24 +502,147 @@ export async function refreshStoredAuth(auth: StoredAuth): Promise<StoredAuth> {
   if (!token.access_token) {
     throw new Error("xAI refresh response did not include an access token");
   }
+  return token as TokenPayload & { access_token: string };
+}
+
+export async function refreshStoredAuth(auth: StoredAuth): Promise<StoredAuth> {
+  const token = await refreshAccessToken(auth.refresh, auth.tokenEndpoint);
   return {
     provider: "xai-oauth",
     access: token.access_token,
     refresh: token.refresh_token || auth.refresh,
-    expires:
-      Date.now() + Number(token.expires_in || 3600) * 1000 - REFRESH_SKEW_MS,
+    expires: oauthExpiry(token.expires_in),
     tokenEndpoint: auth.tokenEndpoint,
     tokenType: token.token_type || auth.tokenType || "Bearer",
   };
+}
+
+let refreshStoredAuthPromise: Promise<StoredAuth> | undefined;
+let refreshStoredAuthKey: string | undefined;
+
+function refreshStoredAuthSingleFlight(auth: StoredAuth, path = authPath()) {
+  const key = `${path}:${auth.refresh}`;
+  if (!refreshStoredAuthPromise || refreshStoredAuthKey !== key) {
+    refreshStoredAuthKey = key;
+    refreshStoredAuthPromise = refreshStoredAuth(auth)
+      .then((refreshed) => {
+        writeStoredAuth(refreshed, path);
+        return refreshed;
+      })
+      .finally(() => {
+        refreshStoredAuthPromise = undefined;
+        refreshStoredAuthKey = undefined;
+      });
+  }
+  return refreshStoredAuthPromise;
+}
+
+export async function requestDeviceCode(
+  deviceAuthorizationEndpoint = XAI_OAUTH_DEVICE_AUTHORIZATION_URL
+): Promise<DeviceCodeResponse> {
+  const response = await fetch(deviceAuthorizationEndpoint, {
+    method: "POST",
+    headers: authHeaders(),
+    body: new URLSearchParams({
+      client_id: XAI_OAUTH_CLIENT_ID,
+      scope: XAI_OAUTH_SCOPE,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `xAI device code request failed: ${response.status} ${await response.text()}`
+    );
+  }
+  const json = (await response.json()) as DeviceCodeResponse;
+  if (!(json.device_code && json.user_code && json.verification_uri)) {
+    throw new Error(
+      "xAI device code response is missing device_code / user_code / verification_uri"
+    );
+  }
+  return json;
+}
+
+async function sleep(ms: number) {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+export async function pollDeviceCodeToken(
+  device: DeviceCodeResponse,
+  options: {
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    tokenEndpoint?: string;
+  } = {}
+): Promise<TokenPayload> {
+  const now = options.now || (() => Date.now());
+  const wait = options.sleep || sleep;
+  const expiresInMs = positiveSecondsToMs(
+    device.expires_in,
+    DEVICE_CODE_DEFAULT_EXPIRES_MS
+  );
+  const deadline = now() + expiresInMs;
+  let intervalMs = Math.max(
+    positiveSecondsToMs(device.interval, DEVICE_CODE_DEFAULT_INTERVAL_MS),
+    DEVICE_CODE_MIN_INTERVAL_MS
+  );
+
+  while (now() < deadline) {
+    const response = await fetch(options.tokenEndpoint || XAI_OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: authHeaders(),
+      body: new URLSearchParams({
+        grant_type: DEVICE_CODE_GRANT_TYPE,
+        client_id: XAI_OAUTH_CLIENT_ID,
+        device_code: device.device_code,
+      }),
+    });
+    if (response.ok) {
+      return (await response.json()) as TokenPayload;
+    }
+
+    const body = (await response
+      .json()
+      .catch(() => ({}))) as DeviceTokenErrorBody;
+    const remaining = Math.max(0, deadline - now());
+    if (body.error === "authorization_pending") {
+      await wait(
+        Math.min(intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS, remaining)
+      );
+      continue;
+    }
+    if (body.error === "slow_down") {
+      intervalMs += DEVICE_CODE_SLOW_DOWN_INCREMENT_MS;
+      await wait(
+        Math.min(intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS, remaining)
+      );
+      continue;
+    }
+    if (
+      body.error === "access_denied" ||
+      body.error === "authorization_denied"
+    ) {
+      throw new Error("xAI device authorization was denied");
+    }
+    if (body.error === "expired_token") {
+      throw new Error("xAI device code expired - please re-run login");
+    }
+    throw new Error(
+      `xAI device token exchange failed: ${response.status} ${body.error_description || body.error || ""}`.trim()
+    );
+  }
+
+  throw new Error("xAI device authorization timed out");
 }
 
 export async function resolveXaiCredentials(): Promise<XaiCredentials> {
   const stored = readStoredAuth();
   if (stored?.access) {
     let current = stored;
-    if (stored.expires <= Date.now()) {
-      current = await refreshStoredAuth(stored);
-      writeStoredAuth(current);
+    const expiresSoon =
+      stored.expires - Date.now() <= REFRESH_SKEW_MS ||
+      accessTokenIsExpiring(stored.access);
+    if (expiresSoon) {
+      current = await refreshStoredAuthSingleFlight(stored);
     }
     return {
       provider: "xai-oauth",
@@ -328,17 +667,17 @@ export async function beginOAuth() {
   const discovery = await discoverXaiOAuth();
   const callback = await startCallbackServer();
   const state = randomBytes(16).toString("base64url");
+  const nonce = randomBytes(32).toString("base64url");
   const { verifier, challenge } = pkcePair();
-  const url = new URL(discovery.authorization_endpoint);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_id", XAI_OAUTH_CLIENT_ID);
-  url.searchParams.set("redirect_uri", callback.redirectUri);
-  url.searchParams.set("scope", XAI_OAUTH_SCOPE);
-  url.searchParams.set("state", state);
-  url.searchParams.set("code_challenge", challenge);
-  url.searchParams.set("code_challenge_method", "S256");
   return {
-    url: url.toString(),
+    url: buildAuthorizeUrl({
+      authorizationEndpoint:
+        discovery.authorization_endpoint || XAI_OAUTH_AUTHORIZE_URL,
+      challenge,
+      nonce,
+      redirectUri: callback.redirectUri,
+      state,
+    }),
     instructions:
       "브라우저에서 xAI/Grok 로그인을 완료하세요. 원격 환경이면 redirect URL 전체를 복사해 CLI에 붙여넣으세요.",
     async complete(signal?: AbortSignal) {
@@ -361,6 +700,37 @@ export async function beginOAuth() {
       } finally {
         callback.close();
       }
+    },
+  };
+}
+
+export async function beginDeviceOAuth() {
+  const discovery = await discoverXaiOAuth();
+  const tokenEndpoint = discovery.token_endpoint || XAI_OAUTH_TOKEN_URL;
+  const device = await requestDeviceCode(
+    discovery.device_authorization_endpoint ||
+      XAI_OAUTH_DEVICE_AUTHORIZATION_URL
+  );
+  return {
+    url: device.verification_uri_complete || device.verification_uri,
+    instructions: `Open ${device.verification_uri} on any device and enter code: ${device.user_code}`,
+    async complete() {
+      const token = await pollDeviceCodeToken(device, { tokenEndpoint });
+      if (!(token.access_token && token.refresh_token)) {
+        throw new Error(
+          "xAI token response did not include access/refresh tokens"
+        );
+      }
+      const auth: StoredAuth = {
+        provider: "xai-oauth",
+        access: token.access_token,
+        refresh: token.refresh_token,
+        expires: oauthExpiry(token.expires_in),
+        tokenEndpoint,
+        tokenType: token.token_type || "Bearer",
+      };
+      writeStoredAuth(auth);
+      return auth;
     },
   };
 }
@@ -567,7 +937,6 @@ export async function xaiVideoGenerate(
     body.reference_images = args.reference_image_urls.map((url) => ({ url }));
   }
 
-  // Submit generation request (Hermes reference: uses /videos/generations + idempotency key)
   const submitRes = await xaiFetch("/videos/generations", {
     method: "POST",
     headers: { "x-idempotency-key": idempotencyKey },
@@ -579,7 +948,6 @@ export async function xaiVideoGenerate(
     throw new Error("xAI video submit response did not include request_id");
   }
 
-  // Poll until done / failed / expired (modeled on Hermes XAIVideoGenProvider._poll)
   const TIMEOUT_MS = testOpts?.maxWaitMs ?? 300_000; // 5 minutes
   const POLL_INTERVAL_MS = testOpts?.pollIntervalMs ?? 5000;
   const start = Date.now();
@@ -604,7 +972,6 @@ export async function xaiVideoGenerate(
         data.error?.message || data.message || `ended with status ${status}`;
       throw new Error(`xAI video generation ${status}: ${errMsg}`);
     }
-    // pending / processing / queued etc.
     await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   throw new Error(
@@ -612,13 +979,6 @@ export async function xaiVideoGenerate(
   );
 }
 
-/**
- * Download a remote media URL (image or video) and save it locally under the project's
- * `.opencode/artifacts/` directory. Returns the absolute path to the saved file.
- *
- * This allows OpenCode to display the media as a persistent popup/attachment
- * even after the temporary xAI CDN URL expires.
- */
 export async function downloadMediaToArtifacts(
   url: string,
   filename: string,
@@ -642,9 +1002,6 @@ export async function downloadMediaToArtifacts(
   return filePath;
 }
 
-/**
- * Save a base64-encoded image (from xAI when response_format=b64_json) to the artifacts folder.
- */
 export async function saveBase64Image(
   b64Data: string,
   filename: string,
