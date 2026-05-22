@@ -11,11 +11,15 @@ import { join } from "node:path";
 import { plugin as XaiOAuthPlugin } from "../src/index";
 import { PACKAGE_VERSION } from "../src/version";
 import {
+  accessTokenIsExpiring,
   authPath,
+  buildAuthorizeUrl,
   defaultAuthPath,
   legacyAuthPath,
   pkcePair,
+  pollDeviceCodeToken,
   readStoredAuth,
+  requestDeviceCode,
   type StoredAuth,
   writeStoredAuth,
   xaiImageGenerate,
@@ -23,8 +27,18 @@ import {
   xaiVideoGenerate,
 } from "../src/xai";
 
-function pluginCtx() {
-  return { client: { app: { log: async () => undefined } } } as never;
+function pluginCtx(options?: {
+  authSet?: (input: {
+    body?: Record<string, unknown>;
+    path: { id: string };
+  }) => Promise<unknown> | unknown;
+}) {
+  return {
+    client: {
+      app: { log: async () => undefined },
+      auth: { set: options?.authSet || (async () => true) },
+    },
+  } as never;
 }
 
 function authFixture(overrides: Partial<StoredAuth> = {}): StoredAuth {
@@ -37,6 +51,14 @@ function authFixture(overrides: Partial<StoredAuth> = {}): StoredAuth {
     tokenType: "Bearer",
     ...overrides,
   };
+}
+
+function makeJwt(payload: object) {
+  const header = Buffer.from(
+    JSON.stringify({ alg: "none", typ: "JWT" })
+  ).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${header}.${body}.sig`;
 }
 
 const originalFetch = globalThis.fetch;
@@ -111,6 +133,11 @@ describe("XaiOAuthPlugin", () => {
       "xai_video_generate",
       "xai_web_search",
       "xai_x_search",
+    ]);
+    expect(plugin.auth?.methods.map((method) => method.label)).toEqual([
+      "xAI OAuth (Grok / SuperGrok)",
+      "xAI OAuth (Headless / Remote / VPS)",
+      "xAI API key",
     ]);
   });
 
@@ -219,7 +246,7 @@ describe("XaiOAuthPlugin", () => {
     expect(String(result)).toContain("credentials not found");
   });
 
-  test("auth loader refreshes expired OAuth file instead of returning stale OpenCode access token", async () => {
+  test("auth loader refreshes expired plugin-managed OAuth at request time and deduplicates concurrent refreshes", async () => {
     useTempAuthFile();
     writeStoredAuth(
       authFixture({
@@ -229,24 +256,37 @@ describe("XaiOAuthPlugin", () => {
       })
     );
 
-    let refreshBody = "";
+    let refreshCount = 0;
+    const requestHeaders: string[] = [];
     globalThis.fetch = ((
-      _url: Parameters<typeof fetch>[0],
+      url: Parameters<typeof fetch>[0],
       init?: Parameters<typeof fetch>[1]
     ) => {
-      refreshBody = String(init?.body || "");
+      if (String(url) === "https://auth.x.ai/oauth2/token") {
+        refreshCount++;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "fresh-access",
+              refresh_token: "rotated-refresh-token",
+              expires_in: 3600,
+              token_type: "Bearer",
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          )
+        );
+      }
+      requestHeaders.push(
+        new Headers(init?.headers).get("authorization") || ""
+      );
       return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            access_token: "fresh-access",
-            expires_in: 3600,
-            token_type: "Bearer",
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          }
-        )
+        new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
       );
     }) as unknown as typeof fetch;
 
@@ -261,12 +301,103 @@ describe("XaiOAuthPlugin", () => {
       {} as never
     );
 
-    expect(refreshBody).toContain("grant_type=refresh_token");
     if (!loaded) {
       throw new Error("expected auth loader result");
     }
-    expect(loaded.apiKey).toBe("fresh-access");
+    expect(loaded.apiKey).toBe("opencode-xai-oauth");
+    await Promise.all([
+      loaded.fetch?.(new URL("https://api.x.ai/v1/chat/completions"), {
+        headers: { "x-test": "1" },
+      }),
+      loaded.fetch?.(new URL("https://api.x.ai/v1/chat/completions"), {
+        headers: { "x-test": "2" },
+      }),
+    ]);
+
+    expect(refreshCount).toBe(1);
+    expect(requestHeaders).toEqual([
+      "Bearer fresh-access",
+      "Bearer fresh-access",
+    ]);
     expect(readStoredAuth()?.access).toBe("fresh-access");
+    expect(readStoredAuth()?.refresh).toBe("rotated-refresh-token");
+  });
+
+  test("auth loader refreshes OpenCode-managed OAuth at request time when the plugin auth file is absent", async () => {
+    useTempAuthFile("missing-auth.json");
+    const setCalls: Array<{
+      body?: Record<string, unknown>;
+      path: { id: string };
+    }> = [];
+    const requestHeaders: string[] = [];
+    let refreshBody = "";
+    globalThis.fetch = ((
+      url: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1]
+    ) => {
+      if (String(url) === "https://auth.x.ai/oauth2/token") {
+        refreshBody = String(init?.body || "");
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              access_token: "fresh-opencode-access",
+              refresh_token: "rotated-opencode-refresh",
+              expires_in: 3600,
+              token_type: "Bearer",
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          )
+        );
+      }
+      requestHeaders.push(
+        new Headers(init?.headers).get("authorization") || ""
+      );
+      return Promise.resolve(
+        new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    }) as unknown as typeof fetch;
+
+    const plugin = await XaiOAuthPlugin(
+      pluginCtx({
+        authSet: (input) => {
+          setCalls.push(input);
+          return true;
+        },
+      })
+    );
+    const loaded = await plugin.auth?.loader?.(
+      async () => ({
+        type: "oauth",
+        access: "stale-opencode-access",
+        refresh: "opencode-refresh-token",
+        expires: Date.now() - 1000,
+      }),
+      {} as never
+    );
+
+    if (!loaded) {
+      throw new Error("expected auth loader result");
+    }
+
+    await loaded.fetch?.(new URL("https://api.x.ai/v1/chat/completions"), {
+      headers: { "x-test": "1" },
+    });
+
+    expect(refreshBody).toContain("grant_type=refresh_token");
+    expect(requestHeaders).toEqual(["Bearer fresh-opencode-access"]);
+    expect(setCalls).toHaveLength(1);
+    expect(setCalls[0].path.id).toBe("xai");
+    expect(setCalls[0].body).toMatchObject({
+      type: "oauth",
+      access: "fresh-opencode-access",
+      refresh: "rotated-opencode-refresh",
+    });
   });
 
   test("chat headers reload expired OAuth credentials at runtime", async () => {
@@ -311,6 +442,45 @@ describe("XaiOAuthPlugin", () => {
     expect(readStoredAuth()?.refresh).toBe("rotated-runtime-refresh-token");
   });
 
+  test("chat headers refresh when the stored JWT is near expiry even if the saved deadline is later", async () => {
+    useTempAuthFile();
+    writeStoredAuth(
+      authFixture({
+        access: makeJwt({ exp: Math.floor((Date.now() + 30_000) / 1000) }),
+        refresh: "jwt-refresh-token",
+        expires: Date.now() + 24 * 60 * 60 * 1000,
+      })
+    );
+
+    const refreshBodies: string[] = [];
+    globalThis.fetch = ((
+      _url: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1]
+    ) => {
+      refreshBodies.push(String(init?.body || ""));
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            access_token: "jwt-refreshed-access",
+            refresh_token: "jwt-rotated-refresh-token",
+            expires_in: 3600,
+            token_type: "Bearer",
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }
+        )
+      );
+    }) as unknown as typeof fetch;
+
+    const headers = await applyChatHeaders("xai");
+
+    expect(refreshBodies).toHaveLength(1);
+    expect(headers.Authorization).toBe("Bearer jwt-refreshed-access");
+    expect(readStoredAuth()?.refresh).toBe("jwt-rotated-refresh-token");
+  });
+
   test("chat headers do not break OpenCode-managed auth when no reloadable credentials exist", async () => {
     useTempAuthFile("missing-auth.json");
     delete process.env.XAI_API_KEY;
@@ -330,7 +500,7 @@ describe("XaiOAuthPlugin", () => {
     expect(headers.Authorization).toBe("Bearer xai-runtime-api-key");
   });
 
-  test("chat headers fail closed when expired OAuth refresh fails at runtime", async () => {
+  test("chat headers fail closed when expired OAuth refresh fails at runtime", () => {
     useTempAuthFile();
     writeStoredAuth(
       authFixture({
@@ -350,10 +520,11 @@ describe("XaiOAuthPlugin", () => {
       headers: Record<string, string>;
     };
 
-    await expect(applyChatHeaders("xai", output.headers)).rejects.toThrow(
-      "xAI token refresh failed"
-    );
+    const rejection = expect(
+      applyChatHeaders("xai", output.headers)
+    ).rejects.toThrow("xAI token refresh failed");
     expect(output.headers.Authorization).toBe("Bearer stale-runtime-token");
+    return rejection;
   });
 
   test("chat headers do not touch non-xAI providers", async () => {
@@ -378,7 +549,7 @@ describe("XaiOAuthPlugin", () => {
     expect(env.XAI_BASE_URL).toBeUndefined();
   });
 
-  test("shell env fail closes when expired OAuth refresh fails", async () => {
+  test("shell env fail closes when expired OAuth refresh fails", () => {
     useTempAuthFile();
     writeStoredAuth(
       authFixture({
@@ -392,7 +563,7 @@ describe("XaiOAuthPlugin", () => {
         new Response("invalid refresh", { status: 401 })
       )) as unknown as typeof fetch;
 
-    await expect(applyShellEnv()).rejects.toThrow("xAI token refresh failed");
+    return expect(applyShellEnv()).rejects.toThrow("xAI token refresh failed");
   });
 });
 
@@ -402,6 +573,52 @@ describe("xAI auth helpers", () => {
     expect(pair.verifier.length).toBeGreaterThan(20);
     expect(pair.challenge.length).toBeGreaterThan(20);
     expect(pair.verifier).not.toBe(pair.challenge);
+  });
+
+  test("builds the upstream xAI authorize URL parameters", () => {
+    const url = new URL(
+      buildAuthorizeUrl({
+        authorizationEndpoint: "https://auth.x.ai/oauth2/authorize",
+        challenge: "challenge-123",
+        nonce: "nonce-456",
+        redirectUri: "http://127.0.0.1:56121/callback",
+        state: "state-789",
+      })
+    );
+
+    expect(url.origin + url.pathname).toBe(
+      "https://auth.x.ai/oauth2/authorize"
+    );
+    expect(url.searchParams.get("response_type")).toBe("code");
+    expect(url.searchParams.get("client_id")).toBe(
+      "b1a00492-073a-47ea-816f-4c329264a828"
+    );
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "http://127.0.0.1:56121/callback"
+    );
+    expect(url.searchParams.get("scope")).toContain("offline_access");
+    expect(url.searchParams.get("code_challenge")).toBe("challenge-123");
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(url.searchParams.get("state")).toBe("state-789");
+    expect(url.searchParams.get("nonce")).toBe("nonce-456");
+    expect(url.searchParams.get("plan")).toBe("generic");
+    expect(url.searchParams.get("referrer")).toBe("opencode");
+  });
+
+  test("detects expiring JWT access tokens and ignores opaque or malformed values", () => {
+    expect(
+      accessTokenIsExpiring(
+        makeJwt({ exp: Math.floor((Date.now() + 30_000) / 1000) })
+      )
+    ).toBe(true);
+    expect(
+      accessTokenIsExpiring(
+        makeJwt({ exp: Math.floor((Date.now() + 24 * 60 * 60 * 1000) / 1000) }),
+        0
+      )
+    ).toBe(false);
+    expect(accessTokenIsExpiring("opaque-token")).toBe(false);
+    expect(accessTokenIsExpiring("bad.jwt")).toBe(false);
   });
 
   test("stores auth file with restricted JSON payload", () => {
@@ -446,6 +663,124 @@ describe("xAI auth helpers", () => {
     writeFileSync(authPath(), "{not-json");
     expect(readStoredAuth()).toBeUndefined();
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("requestDeviceCode posts the expected form body and validates required fields", async () => {
+    let requestBody = "";
+    globalThis.fetch = ((
+      _url: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1]
+    ) => {
+      requestBody = String(init?.body || "");
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            device_code: "DEVICE-1",
+            user_code: "ABCD-1234",
+            verification_uri: "https://x.ai/device",
+            verification_uri_complete:
+              "https://x.ai/device?user_code=ABCD-1234",
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }
+        )
+      );
+    }) as unknown as typeof fetch;
+
+    const device = await requestDeviceCode(
+      "https://auth.x.ai/oauth2/device/code"
+    );
+
+    expect(device.user_code).toBe("ABCD-1234");
+    const params = new URLSearchParams(requestBody);
+    expect(params.get("client_id")).toBe(
+      "b1a00492-073a-47ea-816f-4c329264a828"
+    );
+    expect(params.get("scope")).toContain("offline_access");
+    expect(params.get("scope")).toContain("api:access");
+  });
+
+  test("pollDeviceCodeToken handles pending, slow_down, success, and terminal errors", async () => {
+    let attempts = 0;
+    const sleeps: number[] = [];
+    globalThis.fetch = (() => {
+      attempts++;
+      if (attempts === 1) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: "authorization_pending" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          })
+        );
+      }
+      if (attempts === 2) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: "slow_down" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          })
+        );
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            access_token: "AT",
+            refresh_token: "RT",
+            expires_in: 3600,
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }
+        )
+      );
+    }) as unknown as typeof fetch;
+
+    const token = await pollDeviceCodeToken(
+      {
+        device_code: "DEVICE-1",
+        user_code: "ABCD-1234",
+        verification_uri: "https://x.ai/device",
+        interval: 5,
+        expires_in: 600,
+      },
+      {
+        sleep: (ms) => {
+          sleeps.push(ms);
+          return Promise.resolve();
+        },
+        tokenEndpoint: "https://auth.x.ai/oauth2/token",
+      }
+    );
+
+    expect(token.access_token).toBe("AT");
+    expect(sleeps).toEqual([8000, 13_000]);
+
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: "expired_token" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        })
+      )) as unknown as typeof fetch;
+
+    return expect(
+      pollDeviceCodeToken(
+        {
+          device_code: "DEVICE-2",
+          user_code: "WXYZ-9876",
+          verification_uri: "https://x.ai/device",
+          interval: 1,
+          expires_in: 600,
+        },
+        {
+          sleep: async () => undefined,
+          tokenEndpoint: "https://auth.x.ai/oauth2/token",
+        }
+      )
+    ).rejects.toThrow("xAI device code expired");
   });
 
   test("uses current xAI image generation defaults and resolution", async () => {
@@ -538,7 +873,6 @@ describe("xAI auth helpers", () => {
       calls.push({ url: u, method, body, headers });
 
       if (u.includes("/videos/generations") && method === "POST") {
-        // First submit returns request_id
         return Promise.resolve(
           new Response(JSON.stringify({ request_id: "vid-test-123" }), {
             status: 200,
@@ -550,14 +884,12 @@ describe("xAI auth helpers", () => {
       if (u.includes("/videos/vid-test-123") && method === "GET") {
         pollCount++;
         if (pollCount === 1) {
-          // First poll returns pending → one very short sleep in test
           return Promise.resolve(
             new Response(JSON.stringify({ status: "pending" }), {
               status: 200,
             })
           );
         }
-        // Second poll succeeds
         return Promise.resolve(
           new Response(
             JSON.stringify({
@@ -584,7 +916,6 @@ describe("xAI auth helpers", () => {
       { pollIntervalMs: 1, maxWaitMs: 2000 }
     );
 
-    // First call: POST to generations with correct payload + idempotency key
     const submitCall = calls.find(
       (c) => c.url.includes("/videos/generations") && c.method === "POST"
     );
@@ -600,14 +931,12 @@ describe("xAI auth helpers", () => {
     });
     expect(submitCall?.headers?.["x-idempotency-key"]).toBeTruthy();
 
-    // Subsequent calls: polling GETs
     const pollCalls = calls.filter((c) =>
       c.url.includes("/videos/vid-test-123")
     );
     expect(pollCalls.length).toBeGreaterThanOrEqual(2);
     expect(pollCalls[0].method).toBe("GET");
 
-    // Final result shape
     expect(result.status).toBe("done");
     expect(result.video?.url).toBe("https://vidgen.x.ai/test-video.mp4");
     expect(result.model).toBe("grok-imagine-video");
