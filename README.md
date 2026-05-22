@@ -2,10 +2,17 @@
 
 OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, image generation, and video generation.
 
-Current release: `v1.1.5`.
+Current release: `v1.2.0`.
 
 
 ## Release notes
+
+### v1.2.0
+
+- Adds xAI device-code OAuth for headless / remote / VPS environments in both the OpenCode auth picker and the standalone CLI (`opencode-xai-oauth login --device`).
+- Aligns browser OAuth authorization parameters with upstream OpenCode xAI logic (`nonce`, `plan=generic`, `referrer=opencode`) and keeps OAuth token requests on a versioned plugin user-agent.
+- Refreshes plugin-managed OAuth sessions proactively when the JWT access token is near expiry, even when the saved deadline is still in the future.
+- Deduplicates concurrent plugin-managed refreshes so rotating refresh tokens are not replayed by parallel chat/tool requests.
 
 ### v1.1.5
 
@@ -56,11 +63,11 @@ This project does not provide legal advice and does not guarantee that any parti
   - `xai_video_generate`
 
 
-## Supported features in v1.1.5
+## Supported features in v1.2.0
 
 | Area | What works | Notes |
 | --- | --- | --- |
-| OpenCode auth | OAuth login and API-key fallback for provider `xai` | The plugin attaches to the existing xAI provider. |
+| OpenCode auth | Browser OAuth, headless device-code OAuth, and API-key fallback for provider `xai` | The plugin attaches to the existing xAI provider. |
 | Grok chat/provider use | Uses OpenCode's built-in xAI adapter | The plugin only patches auth/config/params, not the provider adapter. |
 | Grok thinking variants | `low`, `medium`, `high` for `grok-4.3` | Only xAI-supported reasoning effort values are exposed. |
 | Grok 4.20 reasoning | Model is marked reasoning-capable | `reasoning_effort` is intentionally not sent for `grok-4.20-reasoning`. |
@@ -110,6 +117,7 @@ After `npm install -g opencode-xai-oauth` (or from source with `bun link`):
 
 ```bash
 opencode-xai-oauth login
+opencode-xai-oauth login --device
 opencode-xai-oauth status
 ```
 
@@ -121,8 +129,10 @@ OAuth:
 
 ```bash
 opencode-xai-oauth login
+opencode-xai-oauth login --device   # headless / remote / VPS flow
 # or during local development:
 bun run src/cli.ts login
+bun run src/cli.ts login --device
 ```
 
 OAuth tokens are stored under the OpenCode config area by default:
