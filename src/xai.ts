@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PACKAGE_VERSION } from "./version";
 
@@ -979,17 +979,54 @@ export async function xaiVideoGenerate(
   );
 }
 
+function resolveArtifactsDir(worktree: string | undefined | null): string {
+  // Some hosts (LaunchAgent, sandboxed launchers, OS service runners) may
+  // invoke tools without a usable worktree string. Empty/whitespace/relative
+  // values previously turned into absolute paths like "/.opencode/artifacts",
+  // which fail with EROFS on macOS SIP-protected roots and leak the error
+  // into the model turn. Fall back through HOME, then a tmp dir.
+  const candidates = [
+    typeof worktree === "string" ? worktree.trim() : "",
+    process.env.OPENCODE_XAI_ARTIFACTS_DIR || "",
+    process.env.HOME || "",
+    homedir() || "",
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    if (!candidate.startsWith("/")) {
+      continue;
+    }
+    if (candidate === "/") {
+      continue;
+    }
+    return join(candidate, ".opencode", "artifacts");
+  }
+  return join(tmpdir(), "opencode-xai-artifacts");
+}
+
+function ensureArtifactsDir(worktree: string | undefined | null): string {
+  const artifactsDir = resolveArtifactsDir(worktree);
+  try {
+    mkdirSync(artifactsDir, { recursive: true });
+    return artifactsDir;
+  } catch (error) {
+    const fallback = join(tmpdir(), "opencode-xai-artifacts");
+    if (fallback === artifactsDir) {
+      throw error;
+    }
+    mkdirSync(fallback, { recursive: true });
+    return fallback;
+  }
+}
+
 export async function downloadMediaToArtifacts(
   url: string,
   filename: string,
   worktree: string
 ): Promise<string> {
-  const { mkdirSync, writeFileSync } = await import("node:fs");
-  const { join } = await import("node:path");
-
-  const artifactsDir = join(worktree, ".opencode", "artifacts");
-  mkdirSync(artifactsDir, { recursive: true });
-
+  const artifactsDir = ensureArtifactsDir(worktree);
   const filePath = join(artifactsDir, filename);
 
   const res = await fetch(url);
@@ -1002,20 +1039,21 @@ export async function downloadMediaToArtifacts(
   return filePath;
 }
 
-export async function saveBase64Image(
+export function saveBase64Image(
   b64Data: string,
   filename: string,
   worktree: string
-): Promise<string> {
-  const { mkdirSync, writeFileSync } = await import("node:fs");
-  const { join } = await import("node:path");
-
-  const artifactsDir = join(worktree, ".opencode", "artifacts");
-  mkdirSync(artifactsDir, { recursive: true });
-
+): string {
+  const artifactsDir = ensureArtifactsDir(worktree);
   const filePath = join(artifactsDir, filename);
   const buffer = Buffer.from(b64Data, "base64");
   writeFileSync(filePath, buffer);
 
   return filePath;
 }
+
+// Exported for tests only.
+export const __testing = {
+  resolveArtifactsDir,
+  ensureArtifactsDir,
+};
