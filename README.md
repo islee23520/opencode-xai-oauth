@@ -2,10 +2,17 @@
 
 OpenCode plugin that attaches OAuth/API-key authentication to OpenCode's built-in `xai` provider and adds xAI/Grok tools for text, web search, X search, TTS, image generation, and video generation.
 
-Current release: `v1.2.0`.
+Current release: `v1.2.1`.
 
 
 ## Release notes
+
+### v1.2.1
+
+- Fixes media artifact saving when OpenCode provides an empty, whitespace-only, relative, or root worktree path.
+- Preserves valid Windows absolute worktree paths and `OPENCODE_XAI_ARTIFACTS_DIR` overrides when resolving `.opencode/artifacts`.
+- Falls back to `$HOME` and then `os.tmpdir()` for artifact writes instead of attempting `/.opencode/artifacts` on service-hosted installs.
+- Extracts artifact path handling into `src/artifacts.ts` and adds regression coverage for fallback and local file writes.
 
 ### v1.2.0
 
@@ -63,7 +70,7 @@ This project does not provide legal advice and does not guarantee that any parti
   - `xai_video_generate`
 
 
-## Supported features in v1.2.0
+## Supported features in v1.2.1
 
 | Area | What works | Notes |
 | --- | --- | --- |
