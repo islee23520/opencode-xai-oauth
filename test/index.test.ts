@@ -7,11 +7,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
+import { __testing, saveBase64Image } from "../src/artifacts";
 import { plugin as XaiOAuthPlugin } from "../src/index";
 import { PACKAGE_VERSION } from "../src/version";
 import {
-  __testing,
   accessTokenIsExpiring,
   authPath,
   buildAuthorizeUrl,
@@ -963,6 +963,18 @@ describe("artifacts directory resolution", () => {
     expect(resolved).toBe(join(tmp, ".opencode", "artifacts"));
   });
 
+  test("accepts a valid absolute Windows worktree", () => {
+    const resolved = String(
+      Reflect.apply(__testing.resolveArtifactsDir, undefined, [
+        "C:\\\\Users\\\\alice\\\\project",
+        win32,
+      ])
+    );
+    expect(resolved).toBe(
+      win32.join("C:\\Users\\alice\\project", ".opencode", "artifacts")
+    );
+  });
+
   test("falls back when worktree is empty", () => {
     const resolved = __testing.resolveArtifactsDir("");
     // Should NOT resolve to /.opencode/artifacts (the EROFS-causing path).
@@ -1005,5 +1017,17 @@ describe("artifacts directory resolution", () => {
     const dir = __testing.ensureArtifactsDir(tmp);
     expect(existsSync(dir)).toBe(true);
     expect(dir).toBe(join(tmp, ".opencode", "artifacts"));
+  });
+
+  test("saveBase64Image writes under the resolved artifacts directory", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "xai-art-save-"));
+    created.push(tmp);
+    const saved = saveBase64Image(
+      Buffer.from("hello world").toString("base64"),
+      "sample.txt",
+      tmp
+    );
+    expect(saved).toBe(join(tmp, ".opencode", "artifacts", "sample.txt"));
+    expect(readFileSync(saved, "utf8")).toBe("hello world");
   });
 });

@@ -1,17 +1,16 @@
 import type { Config, Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
+import { downloadMediaToArtifacts, saveBase64Image } from "./artifacts";
 import { PACKAGE_VERSION } from "./version";
 import {
   accessTokenIsExpiring,
   beginDeviceOAuth,
   beginOAuth,
-  downloadMediaToArtifacts,
   oauthExpiry,
   REFRESH_SKEW_MS,
   readStoredAuth,
   refreshAccessToken,
   resolveXaiCredentials,
-  saveBase64Image,
   XAI_BASE_URL,
   xaiImageGenerate,
   xaiResponses,
