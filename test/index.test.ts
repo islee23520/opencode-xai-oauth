@@ -7,7 +7,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
+import { __testing, saveBase64Image } from "../src/artifacts";
 import { plugin as XaiOAuthPlugin } from "../src/index";
 import { PACKAGE_VERSION } from "../src/version";
 import {
@@ -940,5 +941,93 @@ describe("xAI auth helpers", () => {
     expect(result.status).toBe("done");
     expect(result.video?.url).toBe("https://vidgen.x.ai/test-video.mp4");
     expect(result.model).toBe("grok-imagine-video");
+  });
+});
+
+describe("artifacts directory resolution", () => {
+  const created: string[] = [];
+  afterEach(() => {
+    while (created.length > 0) {
+      const dir = created.pop();
+      if (dir && existsSync(dir)) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    delete process.env.OPENCODE_XAI_ARTIFACTS_DIR;
+  });
+
+  test("uses a valid absolute worktree", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "xai-art-wt-"));
+    created.push(tmp);
+    const resolved = __testing.resolveArtifactsDir(tmp);
+    expect(resolved).toBe(join(tmp, ".opencode", "artifacts"));
+  });
+
+  test("accepts a valid absolute Windows worktree", () => {
+    const resolved = String(
+      Reflect.apply(__testing.resolveArtifactsDir, undefined, [
+        "C:\\\\Users\\\\alice\\\\project",
+        win32,
+      ])
+    );
+    expect(resolved).toBe(
+      win32.join("C:\\Users\\alice\\project", ".opencode", "artifacts")
+    );
+  });
+
+  test("falls back when worktree is empty", () => {
+    const resolved = __testing.resolveArtifactsDir("");
+    // Should NOT resolve to /.opencode/artifacts (the EROFS-causing path).
+    expect(resolved.startsWith("/.opencode/artifacts")).toBe(false);
+    expect(resolved).not.toBe("/.opencode/artifacts");
+  });
+
+  test("falls back when worktree is whitespace", () => {
+    const resolved = __testing.resolveArtifactsDir("   ");
+    expect(resolved.startsWith("/.opencode/artifacts")).toBe(false);
+  });
+
+  test("falls back when worktree is the filesystem root", () => {
+    const resolved = __testing.resolveArtifactsDir("/");
+    expect(resolved).not.toBe("/.opencode/artifacts");
+    expect(resolved).not.toBe(join("/", ".opencode", "artifacts"));
+  });
+
+  test("falls back when worktree is undefined", () => {
+    const resolved = __testing.resolveArtifactsDir(undefined);
+    expect(resolved.startsWith("/.opencode/artifacts")).toBe(false);
+  });
+
+  test("falls back when worktree is relative", () => {
+    const resolved = __testing.resolveArtifactsDir("relative/path");
+    expect(resolved.startsWith("/.opencode/artifacts")).toBe(false);
+  });
+
+  test("respects OPENCODE_XAI_ARTIFACTS_DIR override", () => {
+    const override = mkdtempSync(join(tmpdir(), "xai-art-env-"));
+    created.push(override);
+    process.env.OPENCODE_XAI_ARTIFACTS_DIR = override;
+    const resolved = __testing.resolveArtifactsDir("");
+    expect(resolved).toBe(join(override, ".opencode", "artifacts"));
+  });
+
+  test("ensureArtifactsDir creates the directory and returns it", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "xai-art-ensure-"));
+    created.push(tmp);
+    const dir = __testing.ensureArtifactsDir(tmp);
+    expect(existsSync(dir)).toBe(true);
+    expect(dir).toBe(join(tmp, ".opencode", "artifacts"));
+  });
+
+  test("saveBase64Image writes under the resolved artifacts directory", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "xai-art-save-"));
+    created.push(tmp);
+    const saved = saveBase64Image(
+      Buffer.from("hello world").toString("base64"),
+      "sample.txt",
+      tmp
+    );
+    expect(saved).toBe(join(tmp, ".opencode", "artifacts", "sample.txt"));
+    expect(readFileSync(saved, "utf8")).toBe("hello world");
   });
 });
